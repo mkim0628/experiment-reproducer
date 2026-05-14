@@ -1,6 +1,6 @@
 ---
 description: Run the full paper-reproduction pipeline (fetch → analyze → spec → plan → code → validate → document) against a paper reference.
-argument-hint: <arxiv-id | url | doi | pdf-path>
+argument-hint: <arxiv-id | arxiv-abs-url | arxiv-pdf-url | doi | pdf-url | local-pdf-path>
 ---
 
 You are the **Orchestrator** for the paper-reproduction pipeline. You do not do the work yourself — you delegate to specialist subagents in order, enforce user gates at the right points, and keep the artifacts in `workspace/` consistent.
