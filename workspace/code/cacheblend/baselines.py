@@ -25,7 +25,7 @@ from .kv_cache import ChunkKVStore
 from .precompute import precompute_chunk_kv
 from .selective_recompute import (
     BlendConfig,
-    compute_v_deviation,
+    compute_kv_deviation,
     merge_selective_kv,
     select_hkvd_indices,
 )
@@ -307,19 +307,34 @@ def cacheblend_generate(
         for h in handles:
             h.remove()
 
-    # 3. V-deviation at the check layer over the chunk tokens.
+    # 3. Deviation at the check layer over the chunk tokens. Default mode "v"
+    # matches the released code; "k" and "kv" are ablations exposed via
+    # BlendConfig.deviation_mode.
     check_li = cfg.check_layer
+    rotary_emb = model.model.rotary_emb
+    chunk_positions = torch.arange(total_chunk_len, device=device).unsqueeze(0)
     v_new_full = captured_v[check_li]  # (1, num_kv, total_len, head_dim)
     v_pre_chunks = fused_cache.layers[check_li].values  # (1, num_kv, total_chunk_len, head_dim)
     v_new_chunks = v_new_full[..., :total_chunk_len, :]
-    deviation = compute_v_deviation(v_new_chunks, v_pre_chunks)  # (total_chunk_len,)
+    # For K-deviation we want both K's at the SAME RoPE state. fused_cache K
+    # is post-RoPE (rotated in _build_fused_cache); so we rotate K_new the same
+    # way at the chunk positions before comparing.
+    k_new_pre_check = captured_k_pre[check_li][..., :total_chunk_len, :]
+    k_new_rot_check = recover_rope_k(k_new_pre_check, chunk_positions, rotary_emb)
+    k_pre_chunks = fused_cache.layers[check_li].keys
+    deviation = compute_kv_deviation(
+        k_new_rot_check,
+        k_pre_chunks,
+        v_new_chunks,
+        v_pre_chunks,
+        mode=cfg.deviation_mode,
+    )  # (total_chunk_len,)
     hkvd_idx = select_hkvd_indices(deviation, cfg.recompute_ratio).to(device)
 
     # 4. Build blended cache: at each layer, RoPE-recover K_new at the same
     # positions used for K_pre (which is positions 0..total_chunk_len-1 since
-    # chunks come first), then merge at HKVD indices.
-    rotary_emb = model.model.rotary_emb
-    chunk_positions = torch.arange(total_chunk_len, device=device).unsqueeze(0)
+    # chunks come first), then merge at HKVD indices. (rotary_emb /
+    # chunk_positions were already bound above for the check-layer rotation.)
     blended_cache = DynamicCache()
     for li in range(model.config.num_hidden_layers):
         k_pre_loaded, v_loaded = fused_cache.layers[li].keys, fused_cache.layers[li].values

@@ -4,7 +4,9 @@ Algorithmic decisions (pinned in workspace/spec/ambiguity_log.json):
 
 * HKVD deviation = per-token squared L2 of (V_new - V_pre); summed across
   head and head_dim. Code reference: vllm_blend/vllm/attention/backends/
-  xformers.py:210-211.
+  xformers.py:210-211. The official release uses V only; this module also
+  exposes K-only and combined K+V deviation modes (``BlendConfig.deviation_mode``)
+  as ablations -- not what the official numbers were measured with.
 * Selection is performed at a SINGLE check layer (decoder index 1) and the
   resulting index set is reused on all subsequent layers. Reference:
   vllm_blend/.../models/llama.py:300 (``check_layers:[1]``).
@@ -24,45 +26,90 @@ import torch
 
 
 # ----------------------------------------------------------------------- config
+DEVIATION_MODES = ("v", "k", "kv")
+
+
 @dataclass
 class BlendConfig:
     recompute_ratio: float = 0.15
     check_layer: int = 1
     schedule: str = "single_check"  # or "every_layer"
+    # Which tensor(s) to use when computing per-token deviation at the check
+    # layer. "v" matches the released vllm_blend implementation (HIGH-conf
+    # resolution in ambiguity_log.json). "k" and "kv" are ablations exposed
+    # by user request -- not part of the paper's measured numbers.
+    deviation_mode: str = "v"
+
+    def __post_init__(self) -> None:
+        if self.deviation_mode not in DEVIATION_MODES:
+            raise ValueError(
+                f"deviation_mode must be one of {DEVIATION_MODES}; "
+                f"got {self.deviation_mode!r}"
+            )
+
+
+# ------------------------------------------------------------ per-token reduce
+def _per_token_sq_l2(new: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
+    """Per-token squared-L2 reduction over (head, head_dim) axes.
+
+    Accepts tensors of shape:
+      * (batch, num_kv_heads, seq_len, head_dim) -- HF layout (batch squeezed)
+      * (num_kv_heads, seq_len, head_dim)
+      * (seq_len, head_dim) -- single-head fallback for tests
+    """
+    if new.shape != pre.shape:
+        raise ValueError(f"shape mismatch: {tuple(new.shape)} vs {tuple(pre.shape)}")
+    diff_sq = (new - pre) ** 2
+    if diff_sq.dim() == 4:
+        diff_sq = diff_sq.squeeze(0)
+    if diff_sq.dim() == 3:
+        return diff_sq.sum(dim=(0, 2))
+    if diff_sq.dim() == 2:
+        return diff_sq.sum(dim=-1)
+    raise ValueError(f"unsupported tensor rank {diff_sq.dim()}")
 
 
 # ----------------------------------------------------------------- V-deviation
 def compute_v_deviation(v_new: torch.Tensor, v_pre: torch.Tensor) -> torch.Tensor:
     """Per-token squared-L2 deviation of V_new vs V_pre.
 
-    Accepts tensors of shape:
-      * (..., seq_len, num_kv_heads, head_dim) -- "vllm-style" layout
-      * (..., num_kv_heads, seq_len, head_dim) -- "hf-style" layout
-
-    Returns a 1-D tensor of length ``seq_len`` (the leading batch dim, if any,
-    is squeezed; we only ever evaluate batch=1 in this reproduction).
+    Matches xformers.py:210-211: ``sum((V_new - V_pre)**2, dim=[heads, head_dim])``.
+    Returns a 1-D tensor of length ``seq_len``.
     """
-    if v_new.shape != v_pre.shape:
-        raise ValueError(
-            f"v_new {tuple(v_new.shape)} and v_pre {tuple(v_pre.shape)} must match"
-        )
-    diff_sq = (v_new - v_pre) ** 2
-    if diff_sq.dim() == 4:
-        # (batch, num_kv_heads, seq_len, head_dim) -> reduce heads+head_dim.
-        diff_sq = diff_sq.squeeze(0)
-        # Now (num_kv_heads, seq_len, head_dim); we want per-token (dim=1).
-        return diff_sq.sum(dim=(0, 2))
-    if diff_sq.dim() == 3:
-        # (num_kv_heads, seq_len, head_dim) -> per-token sum over heads & dim.
-        # Matches xformers.py:210: sum over [1,2] where layout is
-        # (seq_len, num_kv_heads, head_dim).
-        # Heuristic: smallest dim is num_kv_heads; sum over the two non-seq
-        # axes. We accept the canonical (num_kv_heads, seq_len, head_dim).
-        return diff_sq.sum(dim=(0, 2))
-    if diff_sq.dim() == 2:
-        # (seq_len, head_dim) — single-head fallback used only in tests.
-        return diff_sq.sum(dim=-1)
-    raise ValueError(f"unsupported tensor rank {diff_sq.dim()}")
+    return _per_token_sq_l2(v_new, v_pre)
+
+
+def compute_k_deviation(k_new: torch.Tensor, k_pre: torch.Tensor) -> torch.Tensor:
+    """Per-token squared-L2 deviation of K_new vs K_pre (ablation only).
+
+    Same reduction as :func:`compute_v_deviation`. The caller must make sure
+    K_new and K_pre are at the SAME RoPE state (both pre-rotation, or both
+    post-rotation) -- comparing one pre and one post would just measure RoPE
+    rather than cross-attention drift.
+    """
+    return _per_token_sq_l2(k_new, k_pre)
+
+
+def compute_kv_deviation(
+    k_new: torch.Tensor,
+    k_pre: torch.Tensor,
+    v_new: torch.Tensor,
+    v_pre: torch.Tensor,
+    mode: str = "v",
+) -> torch.Tensor:
+    """Per-token deviation under one of ``("v", "k", "kv")``.
+
+    "kv" returns the sum of the K and V squared-L2 reductions. There is no
+    cross-axis normalization because both K and V live in (num_kv_heads,
+    head_dim) of equal size for Mistral/Llama-family models.
+    """
+    if mode == "v":
+        return compute_v_deviation(v_new, v_pre)
+    if mode == "k":
+        return compute_k_deviation(k_new, k_pre)
+    if mode == "kv":
+        return compute_k_deviation(k_new, k_pre) + compute_v_deviation(v_new, v_pre)
+    raise ValueError(f"mode must be one of {DEVIATION_MODES}; got {mode!r}")
 
 
 def select_hkvd_indices(deviation: torch.Tensor, r: float) -> torch.LongTensor:

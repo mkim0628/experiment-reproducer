@@ -97,6 +97,7 @@ def run_eval(config_path: str) -> dict:
     max_new = cfg["generation"]["max_new_tokens"]
     ratios = cfg["strategy"]["recompute_ratios"]
     check_layer = cfg["strategy"]["check_layer"]
+    deviation_mode = cfg["strategy"].get("deviation_mode", "v")
 
     results: List[Dict[str, Any]] = []
     for ds_name, ds_cfg in cfg["datasets"].items():
@@ -134,7 +135,11 @@ def run_eval(config_path: str) -> dict:
 
         # cacheblend for each ratio
         for r in ratios:
-            blend_cfg = BlendConfig(recompute_ratio=r, check_layer=check_layer)
+            blend_cfg = BlendConfig(
+                recompute_ratio=r,
+                check_layer=check_layer,
+                deviation_mode=deviation_mode,
+            )
             scores_cb = []
             for i, ex in enumerate(examples):
                 _, chunk_strs = _build_prompts(ds_name, ex)
@@ -145,8 +150,15 @@ def run_eval(config_path: str) -> dict:
                     cfg=blend_cfg, max_new_tokens=max_new, suffix=suffix_text,
                 )
                 scores_cb.append(_score(metric, pred, ex, tokenizer))
-            results.append({"dataset": ds_name, "strategy": "cacheblend", "ratio": r, "mean": float(np.mean(scores_cb)), "n": len(scores_cb)})
-            print(f"  cacheblend r={r}: mean={np.mean(scores_cb):.3f}")
+            results.append({
+                "dataset": ds_name,
+                "strategy": "cacheblend",
+                "ratio": r,
+                "deviation_mode": deviation_mode,
+                "mean": float(np.mean(scores_cb)),
+                "n": len(scores_cb),
+            })
+            print(f"  cacheblend r={r} dev={deviation_mode}: mean={np.mean(scores_cb):.3f}")
 
     # ----- write JSON ---------------------------------------------------------
     out_dir = Path(cfg["output"]["results_dir"])
@@ -163,8 +175,24 @@ def run_eval(config_path: str) -> dict:
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--config", default="configs/default.yaml")
+    p.add_argument(
+        "--deviation-mode",
+        choices=("v", "k", "kv"),
+        default=None,
+        help="Override strategy.deviation_mode from the YAML (v=paper default).",
+    )
     args = p.parse_args()
-    run_eval(args.config)
+    cfg = yaml.safe_load(open(args.config, "r", encoding="utf-8"))
+    if args.deviation_mode is not None:
+        cfg.setdefault("strategy", {})["deviation_mode"] = args.deviation_mode
+        # Re-serialize a temporary config to pass downstream. We keep run_eval's
+        # YAML-path interface stable by writing the override to a sibling tmp.
+        tmp_path = Path(args.config).with_suffix(".override.yaml")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f)
+        run_eval(str(tmp_path))
+    else:
+        run_eval(args.config)
 
 
 if __name__ == "__main__":

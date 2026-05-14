@@ -56,7 +56,7 @@ pip install -r requirements.txt
 cd workspace/code && pytest tests/ -q
 ```
 
-Expect 25 passing in ~4 seconds. This is what `report.json` records as `unit_tests_full_suite`.
+Expect 30 passing (the 25 algorithmic-equivalence gates plus 5 K-deviation ablation tests). This is what `report.json` records as `unit_tests_full_suite`.
 
 ### 3. Smoke run (requires CUDA GPU + `HF_TOKEN`)
 
@@ -73,6 +73,26 @@ cd workspace/code && python -m eval.run_eval --config configs/default.yaml
 ```
 
 Iterates `(2WikiMQA, Musique, SAMSum, MultiNews) × {full_recompute, cacheblend, full_reuse} × r ∈ {0.05, 0.10, 0.15, 0.18}` over 100 examples each. Writes per-cell metrics to `workspace/results/<timestamp>.json`.
+
+### 5. Deviation-mode ablation (V / K / K+V)
+
+The paper does not pin which tensor drives the HKVD selector; the released
+code uses V only (HIGH-confidence resolution in `workspace/spec/ambiguity_log.json`).
+For ablation you can switch the deviation tensor without editing code:
+
+```bash
+# paper default (V only)
+python -m eval.run_eval --config configs/default.yaml --deviation-mode v
+
+# ablation: select by K only
+python -m eval.run_eval --config configs/default.yaml --deviation-mode k
+
+# ablation: select by K + V (per-token squared-L2 sum)
+python -m eval.run_eval --config configs/default.yaml --deviation-mode kv
+```
+
+`--deviation-mode` overrides `strategy.deviation_mode` from the YAML for one
+run; the result JSON records the mode actually used.
 
 ## Results
 

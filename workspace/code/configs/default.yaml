@@ -21,6 +21,9 @@ strategy:
   recompute_ratios: [0.05, 0.10, 0.15, 0.18]
   check_layer: 1
   num_chunks: null   # null => use whatever is in the bundled inputs
+  # HKVD deviation tensor: "v" (matches official release; default), "k", "kv".
+  # "k" and "kv" are ablations -- not what the paper reports.
+  deviation_mode: v
 
 generation:
   max_new_tokens: 32
