@@ -1,0 +1,149 @@
+{
+  "official_code": {
+    "url": "https://github.com/YaoJiayi/CacheBlend",
+    "stars": 183,
+    "last_commit": null,
+    "license": "unspecified (no LICENSE file in repo as of last check)",
+    "notes": "First-author (Jiayi Yao) release that accompanies the EuroSys 2025 paper. Contains a fork of vLLM under vllm_blend/ plus example scripts example/blend.py and example/blend_musique.py, and bundled benchmark inputs in inputs/ (samsum.json, musique_s.json, wikimqa_s.json, plus 1.json..10.json). README explicitly states 'The newest updates will always be at LMCache' so this is the original artifact rather than the maintained one. It does include the gradual-filtering selective-recompute logic described in Section 4 of the paper and reproduces the qualitative behavior (recompute ratio r ~= 15%) but the README does not document a script that reproduces the full TTFT/throughput numbers end-to-end. Requires Python>=3.9, CUDA>=12.1, >=40 GB GPU. The vLLM version is whatever is vendored in vllm_blend/ (not pinned externally)."
+  },
+  "third_party_implementations": [
+    {
+      "url": "https://github.com/LMCache/LMCache",
+      "stars": 8300,
+      "quality_notes": "Production-grade successor maintained by the LMCache team (same authors). Apache-2.0. Integrates CacheBlend-style selective KV recompute as part of a broader KV-cache management layer for vLLM v1 (also adds CPU offload, disaggregated prefill, KV compression). README cites the CacheBlend paper but does NOT claim to reproduce the exact paper numbers; behavior, API surface, and vLLM coupling have changed substantially since the paper. Recommended when you want a working, currently-maintained CacheBlend in production but NOT for bit-exact reproduction of the EuroSys 2025 tables."
+    }
+  ],
+  "libraries": [
+    {
+      "name": "vllm",
+      "version_constraint": "vendored fork in YaoJiayi/CacheBlend/vllm_blend (forked from vLLM ~0.4.x, PyTorch 2.0 era); do NOT pip install upstream vllm, install the in-repo fork with 'pip install -e .'",
+      "why_needed": "CacheBlend is built on vLLM and modifies its model runner / attention paths to expose fetch_kv, prefill_layer, and synchronize. Upstream vLLM does not expose the hooks needed for layer-wise selective recompute."
+    },
+    {
+      "name": "torch",
+      "version_constraint": "==2.0.* (paper says PyTorch v2.0; matches the vendored vLLM fork)",
+      "why_needed": "Core tensor / CUDA runtime. Newer torch breaks the vendored vLLM fork's CUDA extensions."
+    },
+    {
+      "name": "transformers",
+      "version_constraint": "compatible with vLLM 0.4.x (~4.36-4.40)",
+      "why_needed": "Tokenizer and model config loading for Mistral-7B / Yi-34B / Llama-70B."
+    },
+    {
+      "name": "sentence-transformers",
+      "version_constraint": null,
+      "why_needed": "Embedding model (Sentence-BERT family) used to retrieve top-6 chunks by L2 distance for the Musique Extended and 2WikiMQA Extended synthetic RAG datasets."
+    },
+    {
+      "name": "langchain",
+      "version_constraint": null,
+      "why_needed": "Used (a) for 512-token text chunking of contexts in 2WikiMQA / Musique / MultiNews, and (b) as the baseline source for MapReduce and MapRerank chains compared in Figure 13."
+    },
+    {
+      "name": "rouge_score",
+      "version_constraint": null,
+      "why_needed": "Pinned in YaoJiayi/CacheBlend requirements.txt; computes Rouge-L for SAMSum and MultiNews evaluation."
+    },
+    {
+      "name": "faiss-gpu (or faiss-cpu)",
+      "version_constraint": null,
+      "why_needed": "Likely vector index for the retrieval step in the synthetic Extended datasets (paper cites Johnson et al., Billion-scale similarity search with GPUs). Not strictly required if a brute-force L2 search is used."
+    },
+    {
+      "name": "bitsandbytes",
+      "version_constraint": null,
+      "why_needed": "Candidate for the 8-bit quantization applied to Yi-34B and Llama-70B. Paper does not name the quantizer; AWQ / GPTQ are alternatives, but bitsandbytes is what vLLM 0.4.x's load_in_8bit path supports."
+    },
+    {
+      "name": "openai",
+      "version_constraint": null,
+      "why_needed": "Used to call the GPT-4 API to generate 4500 synthetic similar queries per seed dataset (Musique Extended / 2WikiMQA Extended). Only needed if you want to regenerate the synthetic queries; not needed for the core CacheBlend quality/latency experiments."
+    },
+    {
+      "name": "numpy",
+      "version_constraint": null,
+      "why_needed": "Standard numerics; F1 computation and KV-deviation top-k selection."
+    }
+  ],
+  "datasets": [
+    {
+      "name": "2WikiMultihopQA",
+      "source_url": "https://huggingface.co/datasets/xanhho/2WikiMultihopQA",
+      "access_method": "huggingface datasets load_dataset, or use the bundled wikimqa_s.json (200 cases) from YaoJiayi/CacheBlend/inputs/wikimqa_s.json which is what the paper actually evaluates on",
+      "version_or_revision": "Original release: Ho et al. 2020, arXiv:2011.01060. Paper subsamples 200 test cases; the exact 200 used are pinned in the repo file inputs/wikimqa_s.json."
+    },
+    {
+      "name": "MuSiQue (Musique-Ans)",
+      "source_url": "https://github.com/StonyBrookNLP/musique",
+      "access_method": "Direct download from StonyBrookNLP/musique GitHub (the repo ships a download_data.sh that fetches from a Google Drive mirror). Mirror also available at https://huggingface.co/datasets/dgslibisey/MuSiQue. Paper actually evaluates on the bundled inputs/musique_s.json (150 cases) from YaoJiayi/CacheBlend.",
+      "version_or_revision": "Trivedi et al. 2022 (TACL). Paper uses 150 test cases; for bit-exact reproduction use the pinned inputs/musique_s.json from the official repo."
+    },
+    {
+      "name": "SAMSum",
+      "source_url": "https://huggingface.co/datasets/Samsung/samsum",
+      "access_method": "huggingface datasets load_dataset('Samsung/samsum'), or use the bundled YaoJiayi/CacheBlend/inputs/samsum.json (200 cases) for exact reproduction",
+      "version_or_revision": "Gliwa et al. 2019, arXiv:1911.12237. License: CC BY-NC-ND 4.0 (non-commercial). Paper uses 200 test cases at the original 200-400 token chunk granularity (no re-chunking)."
+    },
+    {
+      "name": "MultiNews",
+      "source_url": "https://huggingface.co/datasets/alexfabbri/multi_news",
+      "access_method": "huggingface datasets load_dataset('alexfabbri/multi_news')",
+      "version_or_revision": "Fabbri et al. 2019, arXiv:1906.01749. Paper subsamples 60 cases and re-chunks to 512 tokens with Langchain; the exact 60 sampled docs are NOT pinned in the official repo, so this dataset has a reproducibility risk (silent version drift)."
+    },
+    {
+      "name": "Musique Extended (synthetic RAG)",
+      "source_url": "https://github.com/YaoJiayi/CacheBlend",
+      "access_method": "Not released as a separate dataset; must be regenerated by running the authors' synthetic-query-generation pipeline (GPT-4 API, 3 similar queries per seed) over the 1500 Musique queries. Top-6 retrieval over Sentence-BERT embeddings with L2 distance, first 1K results skipped as cold cache.",
+      "version_or_revision": "6000 queries total = 1500 original + 4500 GPT-4-generated. GPT-4 model version, temperature, and prompt template not specified in the paper; exact regeneration is impossible."
+    },
+    {
+      "name": "2WikiMQA Extended (synthetic RAG)",
+      "source_url": "https://github.com/YaoJiayi/CacheBlend",
+      "access_method": "Same as Musique Extended; regenerate via GPT-4 API + Sentence-BERT retrieval pipeline over the 1500 2WikiMQA queries.",
+      "version_or_revision": "6000 queries total = 1500 original + 4500 GPT-4-generated. Same caveats as Musique Extended."
+    }
+  ],
+  "pretrained_checkpoints": [
+    {
+      "name": "mistralai/Mistral-7B-Instruct-v0.2",
+      "url": "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2",
+      "size": "~14 GB (fp16)",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "01-ai/Yi-34B-Chat (8-bit quantized at inference)",
+      "url": "https://huggingface.co/01-ai/Yi-34B-Chat",
+      "size": "~68 GB (fp16); ~34 GB (8-bit)",
+      "license": "Yi Series Models Community License (free for research and most commercial use)"
+    },
+    {
+      "name": "meta-llama/Llama-2-70b-chat-hf (8-bit quantized at inference)",
+      "url": "https://huggingface.co/meta-llama/Llama-2-70b-chat-hf",
+      "size": "~140 GB (fp16); ~70 GB (8-bit)",
+      "license": "Llama 2 Community License (gated; requires Meta approval on HF)"
+    },
+    {
+      "name": "sentence-transformers/all-MiniLM-L6-v2 (likely embedding model; exact checkpoint NOT named in paper)",
+      "url": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2",
+      "size": "~80 MB",
+      "license": "Apache-2.0"
+    }
+  ],
+  "evaluation_harnesses": [
+    {
+      "name": "rouge_score (Google)",
+      "url": "https://github.com/google-research/google-research/tree/master/rouge",
+      "why": "Standard Python implementation of ROUGE; produces Rouge-L for SAMSum and MultiNews. Pinned in CacheBlend requirements.txt. NB: Rouge-L numbers differ between this library and perl ROUGE-1.5.5; the paper does not specify which it uses, so reproduce with rouge_score for closest match to the public repo."
+    },
+    {
+      "name": "SQuAD-style token F1 (fastforwardlabs notebook)",
+      "url": "https://github.com/fastforwardlabs/ff14_blog/blob/master/_notebooks/2020-06-09-Evaluating_BERT_on_SQuAD.ipynb",
+      "why": "The paper cites this notebook (reference [6]) as the F1 implementation for 2WikiMQA and Musique. It is a word-overlap F1 after lowercasing, stripping articles and punctuation. LongBench's F1 differs slightly and should NOT be substituted blindly."
+    },
+    {
+      "name": "vLLM benchmark_serving.py",
+      "url": "https://github.com/vllm-project/vllm/blob/main/benchmarks/benchmark_serving.py",
+      "why": "Reference scaffolding for measuring TTFT and throughput under a Poisson request rate, matching the methodology in Section 7.2 (Figure 14). The CacheBlend repo does not ship its own throughput harness in a clean form."
+    }
+  ]
+}
