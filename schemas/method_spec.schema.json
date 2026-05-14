@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://experiment-reproducer/schemas/method_spec.schema.json",
+  "title": "Method spec sidecar (method-extractor output, accompanies method_spec.md)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "components", "pipeline", "reproduction_targets", "unknowns_summary"],
+  "properties": {
+    "title": {"type": "string", "minLength": 1},
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "purpose", "inputs", "outputs", "algorithm_source", "hyperparameters", "unknowns"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "purpose": {"type": "string", "minLength": 1},
+          "inputs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "shape_or_type", "description"],
+              "properties": {
+                "name": {"type": "string"},
+                "shape_or_type": {"type": "string"},
+                "description": {"type": "string"}
+              }
+            }
+          },
+          "outputs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "shape_or_type", "description"],
+              "properties": {
+                "name": {"type": "string"},
+                "shape_or_type": {"type": "string"},
+                "description": {"type": "string"}
+              }
+            }
+          },
+          "algorithm_source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["paper_section"],
+            "properties": {
+              "paper_section": {"type": "string", "minLength": 1},
+              "equation_numbers": {"type": "array", "items": {"type": "string"}},
+              "appendix_section": {"type": ["string", "null"]}
+            }
+          },
+          "hyperparameters": {
+            "type": "object",
+            "additionalProperties": {"type": ["string", "number", "boolean", "null"]}
+          },
+          "unknowns": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "pipeline": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Ordered steps describing how components connect end-to-end.",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "reproduction_targets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["metric", "dataset", "paper_value", "source_table_or_figure"],
+        "properties": {
+          "metric": {"type": "string", "minLength": 1},
+          "dataset": {"type": "string", "minLength": 1},
+          "paper_value": {"type": ["string", "number"]},
+          "tolerance": {"type": ["string", "number", "null"]},
+          "source_table_or_figure": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "unknowns_summary": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    }
+  }
+}

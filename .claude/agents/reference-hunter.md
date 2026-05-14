@@ -55,5 +55,18 @@ Write `workspace/references/references.json`:
 - Do not list every match — list the *useful* ones (max ~5 third-party impls).
 - For datasets, capture the exact version. AI dataset reproductions often fail because of silent version changes.
 
+## Schema contract (fail-fast)
+`workspace/references/references.json` MUST conform to `schemas/references.schema.json`. As your final step, run:
+
+```bash
+python scripts/validate.py workspace/references/references.json
+```
+
+Common failures:
+- `official_code` should be `null` (not omitted) when no official code exists.
+- Empty arrays are fine for the other top-level lists, but they must be present.
+
+Fix and re-run until exit 0. Do not modify the schema.
+
 ## Done criteria
-`references.json` exists and validates. Report whether an official implementation was found and how trustworthy it looks.
+`references.json` exists, `validate.py` exits 0. Report whether an official implementation was found and how trustworthy it looks.
