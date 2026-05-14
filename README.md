@@ -74,20 +74,22 @@ cd workspace/code && python -m eval.run_eval --config configs/default.yaml
 
 Iterates `(2WikiMQA, Musique, SAMSum, MultiNews) × {full_recompute, cacheblend, full_reuse} × r ∈ {0.05, 0.10, 0.15, 0.18}` over 100 examples each. Writes per-cell metrics to `workspace/results/<timestamp>.json`.
 
-### 5. Deviation-mode ablation (V / K / K+V)
+### 5. Deviation-mode (K / V / K+V)
 
 The paper does not pin which tensor drives the HKVD selector; the released
-code uses V only (HIGH-confidence resolution in `workspace/spec/ambiguity_log.json`).
-For ablation you can switch the deviation tensor without editing code:
+code uses **V only** (HIGH-confidence resolution in
+`workspace/spec/ambiguity_log.json`). **This reproduction defaults to `k`**
+(per user request) as an ablation; switch to `v` to reproduce the paper's
+exact numbers.
 
 ```bash
-# paper default (V only)
+# this repo's default (K only)
+python -m eval.run_eval --config configs/default.yaml
+
+# paper default (V only) -- use this to compare with the paper's F1 / Rouge-L
 python -m eval.run_eval --config configs/default.yaml --deviation-mode v
 
-# ablation: select by K only
-python -m eval.run_eval --config configs/default.yaml --deviation-mode k
-
-# ablation: select by K + V (per-token squared-L2 sum)
+# K + V (per-token squared-L2 sum)
 python -m eval.run_eval --config configs/default.yaml --deviation-mode kv
 ```
 

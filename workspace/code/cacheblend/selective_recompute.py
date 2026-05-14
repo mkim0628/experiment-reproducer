@@ -35,10 +35,11 @@ class BlendConfig:
     check_layer: int = 1
     schedule: str = "single_check"  # or "every_layer"
     # Which tensor(s) to use when computing per-token deviation at the check
-    # layer. "v" matches the released vllm_blend implementation (HIGH-conf
-    # resolution in ambiguity_log.json). "k" and "kv" are ablations exposed
-    # by user request -- not part of the paper's measured numbers.
-    deviation_mode: str = "v"
+    # layer. The released vllm_blend implementation uses "v" only (HIGH-conf
+    # resolution in ambiguity_log.json); we default to "k" per user request
+    # for this reproduction -- this is an ablation choice, NOT the paper's
+    # measured setting. Set to "v" to match the official numbers.
+    deviation_mode: str = "k"
 
     def __post_init__(self) -> None:
         if self.deviation_mode not in DEVIATION_MODES:
