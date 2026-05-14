@@ -1,0 +1,346 @@
+{
+  "title": "CacheBlend Quality-Only Reproduction on Mistral-7B (HF transformers, from scratch)",
+  "strategy": {
+    "type": "from_scratch",
+    "source_url": "https://github.com/YaoJiayi/CacheBlend",
+    "justification": "The official YaoJiayi/CacheBlend repo is a vendored vLLM 0.4.x fork pinned to PyTorch 2.0 and CUDA 12.1 with heavy custom CUDA kernels; it is impractical to install and modify for a small quality-only reproduction. The user has narrowed scope to F1 / Rouge-L on Mistral-7B fp16 against three strategies (selective recompute, full recompute, full reuse), with TTFT/throughput explicitly out of scope, which removes the only reason to depend on vLLM. Building a thin HuggingFace transformers wrapper that (a) caches per-chunk per-layer K/V in CPU tensors, (b) overrides the Mistral attention forward to apply RoPE re-rotation and selective recompute at a single check layer, and (c) drives layer-by-layer fusion via a custom forward pass, is dramatically more tractable. The official code remains a reference for exact algorithmic details (RoPE recovery, V-deviation top-r%, single check layer at index 1, in-place index assignment), which are pinned in the ambiguity log."
+  },
+  "stack": {
+    "language": "Python 3.10",
+    "framework": "PyTorch 2.2+ with HuggingFace transformers 4.40+",
+    "key_libs": [
+      "torch>=2.2",
+      "transformers>=4.40,<4.46",
+      "accelerate",
+      "datasets",
+      "rouge_score>=0.1.2",
+      "numpy",
+      "tqdm",
+      "pyyaml",
+      "pytest"
+    ]
+  },
+  "modules": [
+    {
+      "path": "code/cacheblend/kv_cache.py",
+      "purpose": "In-memory per-(chunk_hash, layer_id) KV cache store with sha256_cbor hashing, fetch/put API, and pre-RoPE storage convention.",
+      "implements": [
+        "KVCacheStore"
+      ],
+      "public_api": [
+        "class ChunkKVStore:",
+        "  def __init__(self, num_layers: int, dtype: torch.dtype, device: str = 'cpu')",
+        "  def hash_chunk(self, token_ids: list[int], parent_hash: bytes | None = None) -> bytes",
+        "  def put(self, chunk_hash: bytes, layer_id: int, k: torch.Tensor, v: torch.Tensor) -> None",
+        "  def fetch(self, chunk_hash: bytes, layer_id: int) -> tuple[torch.Tensor, torch.Tensor] | None",
+        "  def has(self, chunk_hash: bytes) -> bool"
+      ]
+    },
+    {
+      "path": "code/cacheblend/blend.py",
+      "purpose": "RoPE re-rotation helper that re-applies Mistral's rotary embedding to a stored (un-rotated) K tensor at new absolute positions; mirrors the rotary_emb(new_positions, fake_q, K_pre) call in vllm_blend/llama.py:174-179.",
+      "implements": [
+        "PositionalEncodingRecovery"
+      ],
+      "public_api": [
+        "def recover_rope_k(k_pre: torch.Tensor, new_positions: torch.LongTensor, rotary_emb: Callable) -> torch.Tensor",
+        "def concat_chunk_kvs(per_chunk_kv: list[tuple[Tensor, Tensor]], new_positions: torch.LongTensor, rotary_emb) -> tuple[Tensor, Tensor]"
+      ]
+    },
+    {
+      "path": "code/cacheblend/selective_recompute.py",
+      "purpose": "Core CacheBlend algorithm: layer-by-layer prefill that recomputes Q/K/V only for HKVD-selected tokens, computes V-deviation at the single check layer (idx 1), picks top-r% indices, and reuses them on later layers. Performs in-place index assignment of K/V into the loaded tensors, then runs standard full-sequence attention.",
+      "implements": [
+        "SelectiveKVRecompute",
+        "HKVDSelector",
+        "Fusor"
+      ],
+      "public_api": [
+        "@dataclass class BlendConfig: recompute_ratio: float; check_layer: int = 1; schedule: str = 'single_check'",
+        "class CacheBlendMistral(MistralForCausalLM):",
+        "  def blend_forward(self, input_ids, chunk_boundaries, per_layer_pre_kv, cfg: BlendConfig) -> tuple[Tensor, list[tuple[Tensor, Tensor]]]",
+        "def compute_v_deviation(v_new: Tensor, v_pre: Tensor) -> Tensor",
+        "def select_hkvd_indices(deviation: Tensor, r: float) -> torch.LongTensor",
+        "def selective_layer_forward(layer, hidden_states, position_ids, pre_kv_layer, hkvd_idx, status: int, rotary_emb) -> tuple[Tensor, Tensor, Tensor, torch.LongTensor]"
+      ]
+    },
+    {
+      "path": "code/cacheblend/baselines.py",
+      "purpose": "Implements the two non-CacheBlend strategies: (1) full prefill recompute via the unmodified HF Mistral forward, and (2) full KV reuse (PromptCache-style) which concatenates pre-computed per-chunk KV with RoPE recovery applied, but with NO recompute at any layer.",
+      "implements": [
+        "SelectiveKVRecompute",
+        "PositionalEncodingRecovery"
+      ],
+      "public_api": [
+        "def full_recompute_generate(model, tokenizer, prompt: str, max_new_tokens: int) -> str",
+        "def full_reuse_generate(model, tokenizer, chunks: list[str], query: str, store: ChunkKVStore, max_new_tokens: int) -> str",
+        "def cacheblend_generate(model, tokenizer, chunks: list[str], query: str, store: ChunkKVStore, cfg: BlendConfig, max_new_tokens: int) -> str"
+      ]
+    },
+    {
+      "path": "code/cacheblend/precompute.py",
+      "purpose": "Offline (warm-up) pass that runs the Mistral model on each chunk in isolation and stores its per-layer K (pre-RoPE) and V into ChunkKVStore. This populates the cache that all three strategies will draw from.",
+      "implements": [
+        "KVCacheStore"
+      ],
+      "public_api": [
+        "def precompute_chunk_kv(model, tokenizer, chunk_text: str, store: ChunkKVStore) -> bytes",
+        "def precompute_all_chunks(model, tokenizer, chunks: Iterable[str], store: ChunkKVStore) -> list[bytes]"
+      ]
+    },
+    {
+      "path": "code/eval/datasets.py",
+      "purpose": "Loads 2WikiMQA, Musique, SAMSum, MultiNews from the pinned wikimqa_s.json / musique_s.json / samsum.json bundled in the official CacheBlend repo (or HuggingFace fallbacks), chunks contexts (Langchain-style 512-token chunker; SAMSum native), and applies the exact prompt templates from example/utils.py (build_qa_prompt, build_fewshot_prompt).",
+      "implements": [
+        "KVCacheStore"
+      ],
+      "public_api": [
+        "def load_wikimqa(path: str, n: int | None) -> list[Example]",
+        "def load_musique(path: str, n: int | None) -> list[Example]",
+        "def load_samsum(path: str, n: int | None) -> list[Example]",
+        "def load_multinews(n: int | None) -> list[Example]",
+        "def chunk_text(text: str, tokenizer, chunk_size_tokens: int = 512) -> list[str]",
+        "def build_qa_prompt(question: str, contexts: list[dict]) -> tuple[str, list[str]]  # returns (full_prompt, per_chunk_strings)"
+      ]
+    },
+    {
+      "path": "code/eval/metrics.py",
+      "purpose": "SQuAD-style token-id F1 (using LLM tokenizer, dropping BOS) for 2WikiMQA / Musique and rouge_score Rouge-L (use_stemmer=True) f-measure for SAMSum / MultiNews, matching example/utils.py compute_f1 / compute_rl.",
+      "implements": [
+        "KVCacheStore"
+      ],
+      "public_api": [
+        "def normalize_answer(text: str) -> str",
+        "def compute_f1(pred: str, gold: str, tokenizer) -> float",
+        "def compute_f1_max(pred: str, golds: list[str], tokenizer) -> float",
+        "def compute_rouge_l(pred: str, gold: str) -> float"
+      ]
+    },
+    {
+      "path": "code/eval/run_eval.py",
+      "purpose": "Top-level eval driver: for each (dataset, strategy, recompute_ratio) combination, iterates examples, calls the appropriate generator (cacheblend_generate / full_recompute_generate / full_reuse_generate), records predictions, computes metrics, writes results to workspace/results/<run_id>.json.",
+      "implements": [
+        "Fusor",
+        "LoadingController"
+      ],
+      "public_api": [
+        "def run_eval(config_path: str) -> dict",
+        "def main() -> None  # CLI entry: --config configs/default.yaml"
+      ]
+    },
+    {
+      "path": "code/scripts/run_smoke.py",
+      "purpose": "Five-example end-to-end smoke test on 2WikiMQA at r=0.15, producing one tiny F1 number per strategy; used as fast CI sanity check before launching the full eval grid.",
+      "implements": [
+        "Fusor"
+      ],
+      "public_api": [
+        "def main() -> None  # prints F1_full / F1_cacheblend / F1_reuse on 5 examples"
+      ]
+    },
+    {
+      "path": "code/configs/default.yaml",
+      "purpose": "Single source of truth for run parameters: model id, dtype, dataset subset sizes, recompute_ratio grid, check_layer index, num_chunks per query, max_new_tokens, output dir.",
+      "implements": [
+        "LoadingController"
+      ],
+      "public_api": [
+        "# YAML keys: model.name, model.dtype, datasets.*.n, strategy.recompute_ratios, strategy.check_layer, strategy.num_chunks, generation.max_new_tokens, output.results_dir"
+      ]
+    },
+    {
+      "path": "code/tests/test_kv_cache.py",
+      "purpose": "Unit tests for ChunkKVStore: hash determinism, put/fetch round-trip, miss returns None, dtype preserved.",
+      "implements": [
+        "KVCacheStore"
+      ],
+      "public_api": [
+        "def test_hash_is_deterministic()",
+        "def test_put_fetch_roundtrip()",
+        "def test_miss_returns_none()"
+      ]
+    },
+    {
+      "path": "code/tests/test_rope_recovery.py",
+      "purpose": "Unit tests for PositionalEncodingRecovery: applying RoPE at new positions to stored (un-rotated) K must equal a direct Mistral forward pass at those positions (tolerance 1e-4).",
+      "implements": [
+        "PositionalEncodingRecovery"
+      ],
+      "public_api": [
+        "def test_rope_recovery_matches_direct_forward()",
+        "def test_rope_recovery_shape_preserved()"
+      ]
+    },
+    {
+      "path": "code/tests/test_hkvd_selector.py",
+      "purpose": "Unit tests for V-deviation and top-r% selection: synthetic V_new / V_pre with known per-token squared L2 norms produces the expected top-k indices; r% rounds via ceil.",
+      "implements": [
+        "HKVDSelector"
+      ],
+      "public_api": [
+        "def test_v_deviation_is_per_token_squared_l2()",
+        "def test_topk_selection_with_known_values()",
+        "def test_topk_size_ceil_rule()"
+      ]
+    },
+    {
+      "path": "code/tests/test_selective_recompute.py",
+      "purpose": "Unit test for selective layer forward: when recompute_ratio=1.0 (all tokens selected) the layer output must match the full HF Mistral layer output to fp16 tolerance; when recompute_ratio=0.0 the output must match feeding the loaded pre-KV unchanged.",
+      "implements": [
+        "SelectiveKVRecompute"
+      ],
+      "public_api": [
+        "def test_full_recompute_matches_hf_forward()",
+        "def test_zero_recompute_matches_pure_reuse()",
+        "def test_in_place_index_assignment_preserves_unselected()"
+      ]
+    },
+    {
+      "path": "code/tests/test_metrics.py",
+      "purpose": "Unit tests for F1 and Rouge-L: known string pairs reproduce the SQuAD-notebook F1 values and the rouge_score library's fmeasure.",
+      "implements": [
+        "KVCacheStore"
+      ],
+      "public_api": [
+        "def test_normalize_answer_strips_articles_and_punct()",
+        "def test_f1_known_pairs()",
+        "def test_rouge_l_known_pairs()"
+      ]
+    }
+  ],
+  "test_plan": [
+    {
+      "component": "KVCacheStore",
+      "test_name": "test_hash_is_deterministic",
+      "what_it_pins_down": "Same token-id list produces same sha256_cbor hash across invocations; different parent_hash yields different hash."
+    },
+    {
+      "component": "KVCacheStore",
+      "test_name": "test_put_fetch_roundtrip",
+      "what_it_pins_down": "K and V stored at (hash, layer_id) round-trip bit-exactly; shape (num_kv_heads, chunk_len, head_dim) preserved."
+    },
+    {
+      "component": "PositionalEncodingRecovery",
+      "test_name": "test_rope_recovery_matches_direct_forward",
+      "what_it_pins_down": "Applying rotary_emb to stored pre-rotation K at new positions equals running the original Mistral attention on the same tokens placed at those positions (max abs diff < 1e-4 in fp32)."
+    },
+    {
+      "component": "HKVDSelector",
+      "test_name": "test_v_deviation_is_per_token_squared_l2",
+      "what_it_pins_down": "compute_v_deviation reduces (V_new - V_pre) ** 2 across heads and head_dim, giving one scalar per token (matches vllm_blend xformers.py:210)."
+    },
+    {
+      "component": "HKVDSelector",
+      "test_name": "test_topk_selection_with_known_values",
+      "what_it_pins_down": "Given a deviation vector with known ordering, select_hkvd_indices(r=0.15) returns exactly the ceil(0.15 * N) top indices."
+    },
+    {
+      "component": "SelectiveKVRecompute",
+      "test_name": "test_full_recompute_matches_hf_forward",
+      "what_it_pins_down": "With recompute_ratio=1.0 the layer output matches the unmodified HF Mistral layer (sanity that the layer wrapper is loss-free at the full-recompute extreme)."
+    },
+    {
+      "component": "SelectiveKVRecompute",
+      "test_name": "test_in_place_index_assignment_preserves_unselected",
+      "what_it_pins_down": "After key_old[imp_indices] = key_new, key_old at non-selected positions is bit-identical to its pre-assignment values (no scatter side-effects)."
+    },
+    {
+      "component": "Fusor",
+      "test_name": "smoke_5_examples_2wikimqa",
+      "what_it_pins_down": "End-to-end CacheBlend pipeline produces a non-trivial F1 (> 0.0) on 5 2WikiMQA examples with Mistral-7B-Instruct-v0.2 at r=0.15 without raising."
+    },
+    {
+      "component": "KVCacheStore",
+      "test_name": "test_f1_known_pairs",
+      "what_it_pins_down": "compute_f1('barack obama', 'Barack Obama', tokenizer) == 1.0; compute_f1('paris', 'london', tokenizer) == 0.0; matches the example/utils.py implementation up to tokenizer choice."
+    },
+    {
+      "component": "KVCacheStore",
+      "test_name": "test_rouge_l_known_pairs",
+      "what_it_pins_down": "compute_rouge_l agrees with rouge_score.RougeScorer(['rougeL'], use_stemmer=True).score(...).rougeL.fmeasure on canned examples."
+    }
+  ],
+  "reproduction_targets": [
+    {
+      "metric": "F1 / Rouge-L drop vs full KV recompute",
+      "dataset": "2WikiMQA, Musique (F1) and SAMSum, MultiNews (Rouge-L), Mistral-7B fp16, subset",
+      "paper_value": "<=0.02 average; <=0.01-0.03 worst case",
+      "tolerance": 0.03
+    },
+    {
+      "metric": "F1 / Rouge-L improvement vs full KV reuse",
+      "dataset": "2WikiMQA, Musique, SAMSum, MultiNews, Mistral-7B fp16, subset",
+      "paper_value": "0.15-0.35 absolute (qualitative)",
+      "tolerance": "qualitative range"
+    },
+    {
+      "metric": "Quality loss across r in [5%, 18%]",
+      "dataset": "Mistral-7B (proxy for Yi-34B Figure 16 trend), 4 datasets, subset",
+      "paper_value": "<=0.002 in F1 or Rouge-L (Yi-34B in paper)",
+      "tolerance": 0.03
+    }
+  ],
+  "open_decisions": [
+    {
+      "question": "Which recompute-ratio grid r should we evaluate? Paper sweeps 5-18% on Yi-34B (Figure 16); the released code defaults to 0.15-0.18.",
+      "options": [
+        "Small grid [0.05, 0.10, 0.15, 0.18] matching Figure 16 endpoints",
+        "Single point r=0.15 (paper's stated quality floor r*)",
+        "Two-point [0.15, 0.18] matching the released example scripts",
+        "Dense grid [0.05, 0.08, 0.10, 0.12, 0.15, 0.18]"
+      ],
+      "recommended": "Small grid [0.05, 0.10, 0.15, 0.18] matching Figure 16 endpoints"
+    },
+    {
+      "question": "How many examples per dataset should we use? Paper uses full eval sets (2WikiMQA 200, Musique 150, SAMSum 200, MultiNews 60); a quality-only reproduction can use a subset.",
+      "options": [
+        "50 per dataset (fast iteration, ~2 hours total on 1xA40)",
+        "100 per dataset (balanced)",
+        "200 per dataset (full eval set where available; matches paper)",
+        "All available examples per dataset"
+      ],
+      "recommended": "100 per dataset (balanced)"
+    },
+    {
+      "question": "Which HKVD selection schedule should we implement? The ambiguity log resolved the released code uses a SINGLE check layer at decoder index 1, but the paper describes a gradual-decay schedule.",
+      "options": [
+        "Single check layer at idx 1 only (matches official code; high-confidence resolution)",
+        "Check every layer with the same r% (simpler; deviates from official code but closer to paper's verbal description)",
+        "Implement both behind a flag and ablate"
+      ],
+      "recommended": "Single check layer at idx 1 only (matches official code; high-confidence resolution)"
+    },
+    {
+      "question": "Which Mistral-7B-Instruct version should we target? Paper says 'Mistral-7B' without pinning a release; references.json lists v0.2.",
+      "options": [
+        "mistralai/Mistral-7B-Instruct-v0.1 (closest in time to paper experiments)",
+        "mistralai/Mistral-7B-Instruct-v0.2 (default in references.json; widely used)",
+        "mistralai/Mistral-7B-Instruct-v0.3 (latest; expanded vocab)"
+      ],
+      "recommended": "mistralai/Mistral-7B-Instruct-v0.2 (default in references.json; widely used)"
+    },
+    {
+      "question": "How many context chunks should we concatenate per query? Paper says top-6 for the Extended datasets; the original (non-Extended) eval inputs in inputs/wikimqa_s.json carry the dataset's native context count.",
+      "options": [
+        "5 chunks (default suggested by user)",
+        "6 chunks (matches paper's top-k for Extended)",
+        "Whatever count is in the bundled wikimqa_s.json / musique_s.json (faithful to paper's released inputs)"
+      ],
+      "recommended": "Whatever count is in the bundled wikimqa_s.json / musique_s.json (faithful to paper's released inputs); for SAMSum/MultiNews use the dataset's native chunking."
+    }
+  ],
+  "build_order": [
+    "1. Scaffold code/ tree, configs/default.yaml, pyproject or requirements.txt, and pytest harness.",
+    "2. Implement code/eval/datasets.py with the exact build_qa_prompt and build_fewshot_prompt from example/utils.py; verify on bundled wikimqa_s.json sample.",
+    "3. Implement code/eval/metrics.py (SQuAD-style F1 + Rouge-L) and tests/test_metrics.py; gate on the F1/Rouge-L unit tests.",
+    "4. Implement code/cacheblend/kv_cache.py (sha256_cbor hashing + in-memory CPU store) and tests/test_kv_cache.py.",
+    "5. Implement code/cacheblend/precompute.py: load Mistral-7B-Instruct-v0.2 fp16, run per-chunk forward to capture pre-RoPE K and V per layer; verify shapes against expected (num_kv_heads=8, head_dim=128, num_layers=32).",
+    "6. Implement code/cacheblend/blend.py (RoPE recovery) and tests/test_rope_recovery.py; pin matches against a direct HF forward at the new positions.",
+    "7. Implement code/cacheblend/selective_recompute.py V-deviation and top-r% selection; gate on tests/test_hkvd_selector.py.",
+    "8. Implement the layer-wrapper selective_layer_forward and blend_forward; gate on tests/test_selective_recompute.py (recompute_ratio=1.0 must reproduce HF output bit-close).",
+    "9. Implement code/cacheblend/baselines.py: full_recompute_generate (unmodified HF) and full_reuse_generate (RoPE recovery only, no recompute).",
+    "10. Wire code/scripts/run_smoke.py to run 5 examples on 2WikiMQA across all three strategies and print three F1 numbers; this is the integration gate.",
+    "11. Implement code/eval/run_eval.py: iterate (dataset x strategy x r) grid from configs/default.yaml, write JSON results to workspace/results/.",
+    "12. Resolve open_decisions with user; freeze configs/default.yaml; run the full quality grid; collect and compare against reproduction_targets."
+  ]
+}
