@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://experiment-reproducer/schemas/structured.schema.json",
+  "title": "Paper structured extraction (paper-fetcher output)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "authors", "abstract", "sections", "appendix", "equations", "tables", "figures", "references_section_text"],
+  "properties": {
+    "title": {"type": "string", "minLength": 1},
+    "authors": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "minItems": 1
+    },
+    "arxiv_id": {"type": ["string", "null"]},
+    "doi": {"type": ["string", "null"]},
+    "source_url": {"type": ["string", "null"]},
+    "abstract": {"type": "string", "minLength": 1},
+    "sections": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "text"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "text": {"type": "string"}
+        }
+      }
+    },
+    "appendix": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "text"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "text": {"type": "string"}
+        }
+      }
+    },
+    "equations": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "tables": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["caption", "content"],
+        "properties": {
+          "caption": {"type": "string"},
+          "content": {"type": "string"}
+        }
+      }
+    },
+    "figures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["caption", "page"],
+        "properties": {
+          "caption": {"type": "string"},
+          "page": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    "references_section_text": {"type": "string"},
+    "extraction_warnings": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}

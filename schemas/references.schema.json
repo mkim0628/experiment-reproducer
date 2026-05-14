@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://experiment-reproducer/schemas/references.schema.json",
+  "title": "Reference resources (reference-hunter output)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "official_code",
+    "third_party_implementations",
+    "libraries",
+    "datasets",
+    "pretrained_checkpoints",
+    "evaluation_harnesses"
+  ],
+  "properties": {
+    "official_code": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url", "notes"],
+          "properties": {
+            "url": {"type": "string", "format": "uri"},
+            "stars": {"type": ["integer", "null"], "minimum": 0},
+            "last_commit": {"type": ["string", "null"]},
+            "license": {"type": ["string", "null"]},
+            "notes": {"type": "string"}
+          }
+        }
+      ]
+    },
+    "third_party_implementations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["url", "quality_notes"],
+        "properties": {
+          "url": {"type": "string", "format": "uri"},
+          "stars": {"type": ["integer", "null"], "minimum": 0},
+          "quality_notes": {"type": "string"}
+        }
+      }
+    },
+    "libraries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "why_needed"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "version_constraint": {"type": ["string", "null"]},
+          "why_needed": {"type": "string"}
+        }
+      }
+    },
+    "datasets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "source_url", "access_method"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "source_url": {"type": "string"},
+          "access_method": {"type": "string", "minLength": 1},
+          "version_or_revision": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "pretrained_checkpoints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "url"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "url": {"type": "string"},
+          "size": {"type": ["string", "null"]},
+          "license": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "evaluation_harnesses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "why"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "url": {"type": ["string", "null"]},
+          "why": {"type": "string"}
+        }
+      }
+    }
+  }
+}
