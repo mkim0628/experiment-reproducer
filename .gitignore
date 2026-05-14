@@ -1,0 +1,27 @@
+# Workspace outputs — these are run-specific artifacts, not part of the agent definitions.
+# Uncomment if you want to keep specific paper runs out of git.
+# workspace/paper/*.pdf
+# workspace/paper/paper.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Logs and checkpoints from reproduction runs
+*.log
+*.ckpt
+*.pt
+*.safetensors
+wandb/
+runs/
+outputs/
