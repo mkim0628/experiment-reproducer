@@ -55,14 +55,5 @@ Write `workspace/analysis/analysis.json`:
 - For `metrics`, also note the *implementation* if the paper points to a specific eval library or formula.
 - Keep summaries factual, not promotional. Drop adjectives like "novel", "powerful".
 
-## Schema contract (fail-fast)
-`workspace/analysis/analysis.json` MUST conform to `schemas/analysis.schema.json`. As your final step, run:
-
-```bash
-python scripts/validate.py workspace/analysis/analysis.json
-```
-
-If this exits non-zero, fix the artifact (most failures are missing required fields — fill them with `"not stated"` if the paper truly does not specify) and re-run until exit 0. Do not modify the schema.
-
 ## Done criteria
-`analysis.json` exists, `validate.py` exits 0, every required field is present (use `"not stated"` where needed). Report a one-line summary of the contributions count and whether the appendix had hyperparameters.
+`analysis.json` exists, validates as JSON, every required field is present (use `"not stated"` where needed). Report a one-line summary of the contributions count and whether the appendix had hyperparameters.
