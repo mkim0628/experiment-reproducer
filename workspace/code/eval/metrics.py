@@ -89,3 +89,30 @@ def compute_rouge_l(pred: str, gold: str) -> float:
     """Rouge-L f-measure per google-research/rouge with use_stemmer=True."""
     scorer = _get_rouge_scorer()
     return scorer.score(gold, pred)["rougeL"].fmeasure
+
+
+# ----------------------------------------------------- Claim verification
+_HOVER_LABELS = ("SUPPORTED", "NOT_SUPPORTED")
+
+
+def _norm_label(text: str) -> str:
+    """Map free-form generation to a HoVer label, or '' if neither matches.
+
+    Order matters: NOT_SUPPORTED is checked first so it doesn't get masked
+    by the SUPPORTED substring.
+    """
+    up = text.upper()
+    if "NOT_SUPPORTED" in up or "NOT SUPPORTED" in up or "REFUT" in up:
+        return "NOT_SUPPORTED"
+    if "SUPPORTED" in up or "SUPPORT" in up:
+        return "SUPPORTED"
+    return ""
+
+
+def compute_claim_verification(pred: str, gold: str) -> float:
+    """1.0 if normalized prediction matches the gold label, else 0.0."""
+    return float(_norm_label(pred) == _norm_label(gold))
+
+
+def compute_claim_verification_max(pred: str, golds: Iterable[str]) -> float:
+    return max((compute_claim_verification(pred, g) for g in golds), default=0.0)

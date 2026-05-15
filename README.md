@@ -56,7 +56,7 @@ pip install -r requirements.txt
 cd workspace/code && pytest tests/ -q
 ```
 
-Expect 30 passing (the 25 algorithmic-equivalence gates plus 5 K-deviation ablation tests). This is what `report.json` records as `unit_tests_full_suite`.
+Expect 35 passing (25 algorithmic-equivalence gates + 5 K-deviation ablation tests + 5 extra-dataset loader/metric tests). This is what `report.json` records as `unit_tests_full_suite`.
 
 ### 3. Smoke run (requires CUDA GPU + `HF_TOKEN`)
 
@@ -72,7 +72,27 @@ Runs 3 examples of 2WikiMQA at `r=0.15` across `{full_recompute, cacheblend, ful
 cd workspace/code && python -m eval.run_eval --config configs/default.yaml
 ```
 
-Iterates `(2WikiMQA, Musique, SAMSum, MultiNews) × {full_recompute, cacheblend, full_reuse} × r ∈ {0.05, 0.10, 0.15, 0.18}` over 100 examples each. Writes per-cell metrics to `workspace/results/<timestamp>.json`.
+Iterates `dataset × {full_recompute, cacheblend, full_reuse} × r ∈ {0.05, 0.10, 0.15, 0.18}`. Base datasets are 2WikiMQA, MuSiQue, SAMSum (bundled in `workspace/code/data/`). Writes per-cell metrics to `workspace/results/<timestamp>.json`. Missing dataset files are skipped with a notice.
+
+### 4b. Extra multi-hop datasets (HotpotQA, MultiHop-RAG, HoVer)
+
+For longer-context / deeper multi-hop ablations:
+
+```bash
+# One-time fetch (needs internet; HoVer hits the Wikipedia REST API)
+python workspace/code/scripts/download_extra_datasets.py --which all --n 200
+
+# Then the same eval driver picks them up automatically.
+cd workspace/code && python -m eval.run_eval --config configs/default.yaml
+```
+
+| Dataset | Source | Metric | Task |
+|---|---|---|---|
+| HotpotQA | HF `hotpot_qa/distractor` | F1 | 2-hop bridge / comparison |
+| MultiHop-RAG | github.com/yixuantt/MultiHop-RAG | F1 | 2-4 hop news QA |
+| HoVer | HF `hover` + Wikipedia REST | accuracy | 3-4 hop claim verification |
+
+HoVer's wiki abstracts are cached to `workspace/code/data/_wiki_cache.json` between runs; the first fetch of 200 dev claims takes ~5-10 minutes due to throttling.
 
 ### 5. Deviation-mode (K / V / K+V)
 

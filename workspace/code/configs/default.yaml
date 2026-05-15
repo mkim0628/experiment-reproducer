@@ -16,6 +16,20 @@ datasets:
     path: workspace/code/data/samsum.json
     n: 200
     metric: rouge_l
+  # Extension datasets (Tier-1 multi-hop). Requires one-time fetch:
+  #   python workspace/code/scripts/download_extra_datasets.py --which all
+  hotpotqa:
+    path: workspace/code/data/hotpotqa.json
+    n: 200
+    metric: f1
+  multihop_rag:
+    path: workspace/code/data/multihop_rag.json
+    n: 200
+    metric: f1
+  hover:
+    path: workspace/code/data/hover.json
+    n: 200
+    metric: claim_verification
 
 strategy:
   recompute_ratios: [0.05, 0.10, 0.15, 0.18]

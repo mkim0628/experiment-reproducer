@@ -30,13 +30,21 @@ from cacheblend.kv_cache import ChunkKVStore
 from cacheblend.selective_recompute import BlendConfig
 from eval.datasets import (
     Example,
+    build_claim_verification_prompt,
     build_qa_prompt,
     build_summarization_prompt,
+    load_hotpotqa,
+    load_hover,
+    load_multihop_rag,
     load_musique,
     load_samsum,
     load_wikimqa,
 )
-from eval.metrics import compute_f1_max, compute_rouge_l
+from eval.metrics import (
+    compute_claim_verification_max,
+    compute_f1_max,
+    compute_rouge_l,
+)
 
 
 def _set_seed(seed: int) -> None:
@@ -64,15 +72,19 @@ def _score(metric: str, pred: str, ex: Example, tokenizer) -> float:
         return compute_f1_max(pred, ex.answers, tokenizer)
     if metric == "rouge_l":
         return max(compute_rouge_l(pred, g) for g in ex.answers)
+    if metric == "claim_verification":
+        return compute_claim_verification_max(pred, ex.answers)
     raise ValueError(f"unknown metric {metric}")
 
 
 def _build_prompts(dataset_name: str, ex: Example):
-    if dataset_name in ("wikimqa", "musique"):
+    if dataset_name in ("wikimqa", "musique", "hotpotqa", "multihop_rag"):
         return build_qa_prompt(ex.question, ex.contexts)
     if dataset_name == "samsum":
         dialogue = ex.metadata.get("input", ex.question)
         return build_summarization_prompt(dialogue, ex.contexts)
+    if dataset_name == "hover":
+        return build_claim_verification_prompt(ex.question, ex.contexts)
     raise ValueError(f"unknown dataset {dataset_name}")
 
 
@@ -83,6 +95,12 @@ def _load_dataset(name: str, path: str, n: int) -> List[Example]:
         return load_musique(path, n)
     if name == "samsum":
         return load_samsum(path, n)
+    if name == "hotpotqa":
+        return load_hotpotqa(path, n)
+    if name == "multihop_rag":
+        return load_multihop_rag(path, n)
+    if name == "hover":
+        return load_hover(path, n)
     raise ValueError(f"unknown dataset {name}")
 
 
@@ -101,6 +119,12 @@ def run_eval(config_path: str) -> dict:
 
     results: List[Dict[str, Any]] = []
     for ds_name, ds_cfg in cfg["datasets"].items():
+        if not os.path.exists(ds_cfg["path"]):
+            print(
+                f"[run_eval] dataset={ds_name}: file {ds_cfg['path']} not found, "
+                "skipping (run scripts/download_extra_datasets.py to fetch)"
+            )
+            continue
         examples = _load_dataset(ds_name, ds_cfg["path"], ds_cfg["n"])
         metric = ds_cfg["metric"]
         print(f"[run_eval] dataset={ds_name} n={len(examples)} metric={metric}")

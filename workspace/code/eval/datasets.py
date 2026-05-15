@@ -95,6 +95,67 @@ def load_samsum(path: str, n: Optional[int] = None) -> List[Example]:
     return out
 
 
+def load_hotpotqa(path: str, n: Optional[int] = None) -> List[Example]:
+    """HotpotQA (distractor split via LongBench / HF download).
+
+    Same JSON schema as wikimqa_s.json: list of
+    ``{"question", "ctxs": [{"title","text"}], "answers"}``.
+    """
+    data = _load_json(path)
+    out: List[Example] = []
+    for ex in data[: n if n else len(data)]:
+        out.append(
+            Example(
+                question=ex["question"],
+                contexts=ex["ctxs"],
+                answers=_flatten_answers(ex["answers"]),
+            )
+        )
+    return out
+
+
+def load_multihop_rag(path: str, n: Optional[int] = None) -> List[Example]:
+    """MultiHop-RAG (Tang & Yang, 2024).
+
+    Same JSON schema as wikimqa_s.json. Each query needs 2-4 news articles
+    to answer; the evidence_list from the original release is reshaped into
+    one ``ctxs`` entry per source article.
+    """
+    data = _load_json(path)
+    out: List[Example] = []
+    for ex in data[: n if n else len(data)]:
+        out.append(
+            Example(
+                question=ex["question"],
+                contexts=ex["ctxs"],
+                answers=_flatten_answers(ex["answers"]),
+                metadata={"question_type": ex.get("question_type", "")},
+            )
+        )
+    return out
+
+
+def load_hover(path: str, n: Optional[int] = None) -> List[Example]:
+    """HoVer (Jiang et al., EMNLP 2020) -- multi-hop claim verification.
+
+    The question is the CLAIM, the gold answer is the verdict label string
+    ("SUPPORTED" / "NOT_SUPPORTED"). Contexts are the wiki abstracts of
+    each supporting article. Same JSON schema as wikimqa_s.json on disk.
+    """
+    data = _load_json(path)
+    out: List[Example] = []
+    for ex in data[: n if n else len(data)]:
+        out.append(
+            Example(
+                question=ex["question"],   # = claim
+                contexts=ex["ctxs"],
+                answers=_flatten_answers(ex["answers"]),  # = [label_string]
+                metadata={"num_hops": ex.get("num_hops"), "task": "claim_verification"},
+            )
+        )
+    return out
+
+
 # ----------------------------------------------------------------- chunking
 def chunk_text(text: str, tokenizer, chunk_size_tokens: int = 512) -> List[str]:
     """Naive token-budgeted chunking (no overlap)."""
@@ -124,6 +185,35 @@ def build_qa_prompt(question: str, contexts: List[dict]) -> tuple[str, List[str]
         else:
             chunk_strs.append(body)
     query_str = QA_QUERY.format(question=question) + INST_CLOSE
+    full_prompt = "".join(chunk_strs) + query_str
+    return full_prompt, chunk_strs
+
+
+def build_claim_verification_prompt(
+    claim: str, contexts: List[dict]
+) -> tuple[str, List[str]]:
+    """HoVer-style claim verification.
+
+    Reads several wiki abstracts and decides if the claim is SUPPORTED or
+    NOT_SUPPORTED. We constrain the output vocabulary in the suffix so F1 /
+    string-match scoring is well-defined.
+    """
+    cv_prefix = (
+        "Decide whether the claim is SUPPORTED or NOT_SUPPORTED by the "
+        "given passages. Only output one of the two labels.\n\n"
+        "The following are given passages.\n"
+    )
+    cv_query = (
+        "\n\nClaim: {claim}\n"
+        "Answer SUPPORTED or NOT_SUPPORTED only. Do NOT output any other "
+        "words.\nAnswer:"
+    )
+    chunk_strs: List[str] = []
+    first = INST_OPEN + " " + cv_prefix
+    for i, ctx in enumerate(contexts):
+        body = f"{ctx.get('title','')}\n\n{ctx.get('text','')}\n\n"
+        chunk_strs.append((first if i == 0 else "") + body)
+    query_str = cv_query.format(claim=claim) + INST_CLOSE
     full_prompt = "".join(chunk_strs) + query_str
     return full_prompt, chunk_strs
 
