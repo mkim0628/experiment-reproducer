@@ -6,15 +6,15 @@ model:
 datasets:
   wikimqa:
     path: workspace/code/data/wikimqa_s.json
-    n: 100
+    n: 200
     metric: f1
   musique:
     path: workspace/code/data/musique_s.json
-    n: 100
+    n: 200    # bundled file has 150; loader caps to available
     metric: f1
   samsum:
     path: workspace/code/data/samsum.json
-    n: 100
+    n: 200
     metric: rouge_l
 
 strategy:

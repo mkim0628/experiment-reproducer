@@ -25,12 +25,23 @@ def _attention_modules(model) -> List[torch.nn.Module]:
 
 
 @torch.no_grad()
-def precompute_chunk_kv(model, tokenizer, chunk_text: str, store: ChunkKVStore) -> bytes:
+def precompute_chunk_kv(
+    model,
+    tokenizer,
+    chunk_text: str,
+    store: ChunkKVStore,
+    add_special_tokens: bool = False,
+) -> bytes:
     """Run chunk in isolation and store (K_pre_rope, V) per layer.
+
+    ``add_special_tokens=True`` lets the caller fold a leading BOS (Mistral
+    id=1) into the first chunk so the cached layout matches what
+    full-recompute would feed the model. The resulting chunk hash differs
+    from the no-BOS variant; both can coexist in the same store.
 
     Returns the chunk hash used as the store key.
     """
-    enc = tokenizer(chunk_text, return_tensors="pt", add_special_tokens=False)
+    enc = tokenizer(chunk_text, return_tensors="pt", add_special_tokens=add_special_tokens)
     input_ids = enc["input_ids"].to(model.device)
     token_ids = input_ids[0].tolist()
     chunk_hash = ChunkKVStore.hash_chunk(token_ids)

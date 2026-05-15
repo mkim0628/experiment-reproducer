@@ -124,13 +124,18 @@ def full_reuse_generate(
     device = model.device
     dtype = next(model.parameters()).dtype
 
-    # Make sure each chunk is precomputed.
+    # Make sure each chunk is precomputed. The FIRST chunk includes BOS so
+    # the cached positional layout matches what full_recompute_generate would
+    # feed (which tokenizes the whole prompt with add_special_tokens=True).
     chunk_hashes: List[bytes] = []
     chunk_ids: List[torch.Tensor] = []
-    for c in chunks:
-        ids = _tok_ids(tokenizer, c, add_special_tokens=False)
+    for i, c in enumerate(chunks):
+        add_special = (i == 0)
+        ids = _tok_ids(tokenizer, c, add_special_tokens=add_special)
         chunk_ids.append(ids)
-        chunk_hashes.append(precompute_chunk_kv(model, tokenizer, c, store))
+        chunk_hashes.append(
+            precompute_chunk_kv(model, tokenizer, c, store, add_special_tokens=add_special)
+        )
 
     # Build prefix/suffix prefill segments (if any). The query (and any
     # tokens of suffix/prefix) is what we still need to feed forward.
@@ -238,13 +243,19 @@ def cacheblend_generate(
     device = model.device
     dtype = next(model.parameters()).dtype
 
-    # 1. Ensure chunks are precomputed and assemble the fused cache.
+    # 1. Ensure chunks are precomputed and assemble the fused cache. The
+    # FIRST chunk includes BOS so the cached layout matches what
+    # full_recompute_generate feeds (which adds BOS via add_special_tokens=True).
+    # This is the property that makes r=1 reproduce full_recompute exactly.
     chunk_hashes: List[bytes] = []
     chunk_ids: List[torch.Tensor] = []
-    for c in chunks:
-        ids = _tok_ids(tokenizer, c, add_special_tokens=False)
+    for i, c in enumerate(chunks):
+        add_special = (i == 0)
+        ids = _tok_ids(tokenizer, c, add_special_tokens=add_special)
         chunk_ids.append(ids)
-        chunk_hashes.append(precompute_chunk_kv(model, tokenizer, c, store))
+        chunk_hashes.append(
+            precompute_chunk_kv(model, tokenizer, c, store, add_special_tokens=add_special)
+        )
 
     chunk_lengths = [t.shape[1] for t in chunk_ids]
     total_chunk_len = sum(chunk_lengths)
