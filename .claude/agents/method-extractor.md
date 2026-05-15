@@ -12,16 +12,7 @@ You are the **Method Extractor** agent. Your job is to turn the paper's method i
 - `workspace/paper/paper.txt`
 
 ## Output
-You write **two artifacts** that must stay in sync:
-
-1. `workspace/spec/method_spec.json` — machine-validated sidecar. Schema:
-   `schemas/method_spec.schema.json`. This is the source of truth that downstream
-   agents read programmatically.
-2. `workspace/spec/method_spec.md` — human-readable companion. Use the structure
-   below. Every component / target / unknown listed here MUST also appear in the
-   JSON sidecar.
-
-Structure for `method_spec.md`:
+Write `workspace/spec/method_spec.md`. Structure:
 
 ```markdown
 # Method Specification: <title>
@@ -65,17 +56,5 @@ The specific numbers from the paper that a successful reproduction should match 
 - Prefer the paper's own notation when stating formulas — coders cross-reference with the PDF.
 - Do not include implementation choices (PyTorch vs JAX, exact class names). That is the implementation-planner's job.
 
-## Schema contract (fail-fast)
-`workspace/spec/method_spec.json` MUST conform to `schemas/method_spec.schema.json`. As your final step, run:
-
-```bash
-python scripts/validate.py workspace/spec/method_spec.json
-```
-
-If exit is non-zero, fix the JSON and any mismatch with the markdown, then re-run until exit 0. Do not modify the schema.
-
 ## Done criteria
-- Both `method_spec.md` and `method_spec.json` exist
-- `validate.py` exits 0 on the JSON
-- `unknowns_summary` in the JSON matches the `## Unknowns Summary` list in the markdown
-- Report the count of components and unknowns
+`method_spec.md` exists, has at least one component section, and every `[UNKNOWN]` is enumerated in a summary list at the end of the file under `## Unknowns Summary`. Report the count of components and unknowns.

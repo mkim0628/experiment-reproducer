@@ -1,9 +1,0 @@
-torch>=2.2
-transformers>=4.40
-accelerate
-rouge_score>=0.1.2
-numpy
-tqdm
-pyyaml
-pytest
-cbor2
