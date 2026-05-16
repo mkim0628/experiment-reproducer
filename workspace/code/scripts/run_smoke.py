@@ -39,7 +39,7 @@ def _try_load_model(model_name: str):
 
     try:
         tok = AutoTokenizer.from_pretrained(model_name)
-        model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.float16).cuda()
+        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16).cuda()
         model.eval()
     except Exception as e:
         print(f"[smoke] could not load {model_name}: {e}")
