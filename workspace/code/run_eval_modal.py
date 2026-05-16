@@ -11,9 +11,13 @@ Usage (from `workspace/code/`):
     # full grid from configs/default.yaml
     modal run run_eval_modal.py --mode full
 
-    # override GPU / ratios / dataset size
-    modal run run_eval_modal.py --mode full --gpu A10G --n 50
-    modal run run_eval_modal.py --mode smoke --gpu L4 --n 2
+    # override dataset size
+    modal run run_eval_modal.py --mode full --n 50
+    modal run run_eval_modal.py --mode smoke --n 2
+
+To change the GPU class (e.g. for an A10G upgrade after a confirmed OOM),
+edit the ``gpu=`` arg on ``@app.function`` below. Per CLAUDE.md, never
+default to anything more expensive than L4.
 
 Cost-minimization choices baked in (see CLAUDE.md "Modal GPU cost rules"):
 - Defaults to L4 (cheapest GPU that fits Mistral-7B fp16 with 24 GB headroom).
@@ -75,7 +79,9 @@ app = modal.App("cacheblend-eval")
 # --------------------------------------------------------------- GPU function
 @app.function(
     image=image,
-    gpu="L4",  # overridden by local_entrypoint via app.function.with_options(...)
+    # L4 = cheapest GPU that fits Mistral-7B fp16 with 24 GB headroom.
+    # See CLAUDE.md "Modal GPU cost rules" before upgrading.
+    gpu="L4",
     volumes={
         HF_CACHE_DIR: hf_cache_vol,
         RESULTS_DIR: results_vol,
@@ -156,7 +162,6 @@ def _deep_merge(base: dict, patch: dict) -> None:
 @app.local_entrypoint()
 def main(
     mode: str = "smoke",
-    gpu: str = "L4",
     config: str = "configs/default.yaml",
     n: int = 0,
     download_results: bool = True,
@@ -166,11 +171,11 @@ def main(
     `mode`:
         smoke -> wikimqa only, 1 ratio, n=3
         full  -> exactly what's in the YAML
-    `gpu` :
-        Any Modal GPU spec ("T4", "L4", "A10G", "A100", "H100", "L40S",
-        "A100-80GB"). L4 default = cheapest fp16-7B-friendly GPU.
     `n`   :
         Override examples-per-dataset across the whole grid (0 = use YAML).
+
+    GPU class is fixed in the ``@app.function`` decorator (L4). To upgrade,
+    edit the decorator after confirming an OOM on L4.
     """
     config_path = (CODE_DIR / config).resolve()
     cfg_text = config_path.read_text(encoding="utf-8")
@@ -208,8 +213,8 @@ def main(
     else:
         raise SystemExit(f"unknown --mode {mode!r} (use 'smoke' or 'full')")
 
-    print(f"[local] launching run_eval on Modal GPU={gpu} mode={mode}")
-    summary = run_eval_remote.with_options(gpu=gpu).remote(cfg_text, override)
+    print(f"[local] launching run_eval on Modal (mode={mode})")
+    summary = run_eval_remote.remote(cfg_text, override)
 
     # Show a compact result table in the local terminal.
     print("\n=== results ===")
