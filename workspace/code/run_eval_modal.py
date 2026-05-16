@@ -55,7 +55,11 @@ image = (
         extra_index_url="https://download.pytorch.org/whl/cu121",
     )
     .pip_install(
-        "transformers>=4.44,<5",
+        # plan.json pins transformers<4.46; 4.50+ rewrote
+        # `_cache_dependant_input_preparation` in a way that breaks our
+        # pre-populated past_key_values path in full_reuse_generate
+        # (IndexError on cache_position[-1]). 4.45.2 is the last 4.45 patch.
+        "transformers==4.45.2",
         "accelerate>=0.30",
         "rouge_score>=0.1.2",
         "numpy<2",
