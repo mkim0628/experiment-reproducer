@@ -62,7 +62,7 @@ def _load_model(cfg: Dict[str, Any]):
     dtype = getattr(torch, cfg["model"].get("dtype", "float16"))
     device = cfg["model"].get("device", "cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained(name)
-    model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=dtype).to(device)
+    model = AutoModelForCausalLM.from_pretrained(name, dtype=dtype).to(device)
     model.eval()
     return model, tokenizer, device, dtype
 

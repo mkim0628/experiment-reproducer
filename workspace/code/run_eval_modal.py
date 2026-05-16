@@ -55,11 +55,12 @@ image = (
         extra_index_url="https://download.pytorch.org/whl/cu121",
     )
     .pip_install(
-        # plan.json pins transformers<4.46; 4.50+ rewrote
-        # `_cache_dependant_input_preparation` in a way that breaks our
-        # pre-populated past_key_values path in full_reuse_generate
-        # (IndexError on cache_position[-1]). 4.45.2 is the last 4.45 patch.
-        "transformers==4.45.2",
+        # 4.55+ is needed for the DynamicCache.layers[*].keys/.values API the
+        # cacheblend baselines use. 4.50+ rewrote prepare_inputs_for_generation
+        # to derive `cache_position` from past_key_values; we pass it
+        # explicitly inside `full_reuse_generate` / `cacheblend_generate` so
+        # the latest 4.57.x works.
+        "transformers==4.57.0",
         "accelerate>=0.30",
         "rouge_score>=0.1.2",
         "numpy<2",
