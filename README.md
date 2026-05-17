@@ -90,7 +90,7 @@ cd workspace/code && python -m eval.run_eval --config configs/default.yaml
 |---|---|---|---|
 | HotpotQA | HF `hotpot_qa/distractor` | F1 | 2-hop bridge / comparison |
 | MultiHop-RAG | HF mirror `yixuantt/MultiHopRAG` | F1 | 2-4 hop news QA |
-| HoVer | HF `hover` + Wikipedia REST | accuracy | 3-4 hop claim verification |
+| HoVer | `hover-nlp/hover` raw GitHub + Wikipedia REST | accuracy | 3-4 hop claim verification |
 
 **MultiHop-RAG note**: the `yixuantt/MultiHop-RAG` GitHub repo stores
 `MultiHopRAG.json` via Git LFS, so `raw.githubusercontent.com` returns only

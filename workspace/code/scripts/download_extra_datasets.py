@@ -185,41 +185,51 @@ def _fetch_wiki_abstract(title: str, cache: Dict[str, str], throttle: float) -> 
     return text
 
 
-def fetch_hover(out_path: Path, n: int = 200, throttle: float = 0.05) -> None:
-    """HoVer dev split + Wikipedia REST abstracts for supporting articles."""
-    try:
-        from datasets import load_dataset
-    except ImportError as e:  # pragma: no cover
-        raise SystemExit("`pip install datasets` required for HoVer") from e
+HOVER_DEV_URL = (
+    "https://raw.githubusercontent.com/hover-nlp/hover/main/"
+    "data/hover/hover_dev_release_v1.1.json"
+)
 
-    print(f"[hover] loading hover/validation ...")
+
+def fetch_hover(out_path: Path, n: int = 200, throttle: float = 0.05) -> None:
+    """HoVer dev split (from the official GitHub repo, NOT Git LFS) +
+    Wikipedia REST abstracts for the supporting articles.
+
+    The HF dataset ``hover`` was deprecated when HF migrated top-level
+    namespaces to org-scoped paths; the official JSON release on
+    github.com/hover-nlp/hover is the canonical source and is served as a
+    plain file (no LFS). We download it directly.
+
+    Schema of each record (per github.com/hover-nlp/hover):
+        uid, claim, supporting_facts (list of [title, sent_id]),
+        label ("SUPPORTED" | "NOT_SUPPORTED"), num_hops, hpqa_id
+    """
+    import urllib.request
+
+    print(f"[hover] GET {HOVER_DEV_URL}")
     try:
-        ds = load_dataset("hover", split="validation")
+        req = urllib.request.Request(
+            HOVER_DEV_URL, headers={"User-Agent": "cacheblend-repro/0.1 (research)"}
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            ds = json.loads(r.read().decode("utf-8"))
     except Exception as e:
-        # Several HF mirrors exist with slightly different names.
-        for cand in ("pminervini/hover", "hover-team/hover"):
-            try:
-                print(f"[hover]   retry: {cand}")
-                ds = load_dataset(cand, split="validation")
-                break
-            except Exception:
-                ds = None
-        if ds is None:
-            raise SystemExit(f"could not load HoVer dataset: {e}")
+        raise SystemExit(
+            f"could not download HoVer dev JSON from {HOVER_DEV_URL}: {e!r}"
+        )
 
     n = min(n, len(ds))
     cache = _load_wiki_cache()
     out: List[dict] = []
-    label_map_int = {0: "SUPPORTED", 1: "NOT_SUPPORTED"}
-    for i, ex in enumerate(ds.select(range(n))):
-        # supporting_facts can be either [{key,value}, ...] or [[title,sent_id],...]
-        titles: List[str] = []
+    for i, ex in enumerate(ds[:n]):
+        # supporting_facts is a list of [title, sent_id] pairs.
         sf = ex.get("supporting_facts", [])
-        if sf and isinstance(sf[0], dict):
-            titles = sorted({x["key"] for x in sf})
-        elif sf and isinstance(sf[0], (list, tuple)):
-            titles = sorted({x[0] for x in sf})
-        # Fetch abstracts.
+        titles: List[str] = sorted(
+            {
+                (x["key"] if isinstance(x, dict) else x[0])
+                for x in sf
+            }
+        )
         ctxs = []
         for t in titles:
             text = _fetch_wiki_abstract(t, cache, throttle)
@@ -227,24 +237,25 @@ def fetch_hover(out_path: Path, n: int = 200, throttle: float = 0.05) -> None:
                 ctxs.append({"title": t, "text": text})
         if not ctxs:
             continue
-        label = ex.get("label")
-        label_str = (
-            label_map_int.get(label, str(label)) if isinstance(label, int) else str(label).upper()
-        )
+        label = ex.get("label", "")
         out.append(
             {
                 "question": ex["claim"],
                 "ctxs": ctxs,
-                "answers": [label_str],
+                "answers": [str(label).upper()],
                 "num_hops": ex.get("num_hops"),
+                "uid": ex.get("uid"),
             }
         )
         if (i + 1) % 25 == 0:
             _save_wiki_cache(cache)
-            print(f"[hover]   {i+1}/{n} ...")
+            print(f"[hover]   {i+1}/{n} (kept {len(out)}) ...")
     _save_wiki_cache(cache)
     out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2))
-    print(f"[hover] wrote {len(out)} examples -> {out_path} (cache size {len(cache)})")
+    print(
+        f"[hover] wrote {len(out)} examples -> {out_path} "
+        f"(wiki cache size {len(cache)})"
+    )
 
 
 # --------------------------------------------------------- entry point
