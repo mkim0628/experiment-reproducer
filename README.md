@@ -105,6 +105,40 @@ similarly stratified by `question_type` so all four categories
 | HoVer | `hover-nlp/hover` raw GitHub + Wikipedia REST | accuracy | 3-4 hop claim verification |
 | MultiNews | HF `alexfabbri/multi_news` | Rouge-L | multi-document news summarization (paper: 60 examples) |
 
+### 4c. Phone-friendly downloads (GitHub Actions)
+
+If your local environment can't reach huggingface.co / Wikipedia (Claude
+Code on web's restrictive egress is the common case), use the bundled
+GitHub Actions workflow instead — runners have full network access and
+both setup steps are doable from a phone.
+
+**One-time setup (~2 min):**
+
+1. [Generate an HF read token](https://huggingface.co/settings/tokens).
+2. In this repo: `Settings → Secrets and variables → Actions → New repository secret`.
+   - Name: `HF_TOKEN`
+   - Value: `hf_xxx…`
+
+**Each time you want a fresh dataset JSON:**
+
+1. Repo `Actions` tab → `download-data` workflow → `Run workflow`.
+2. Pick `which` (e.g. `multinews`), `n` (e.g. `60`), `seed`.
+3. The runner fetches → audits → commits to the current branch.
+
+The committed file lands at `workspace/code/data/<which>.json`.
+
+### 4d. Modal alternative (if you have Modal CLI + a non-firewalled shell)
+
+```bash
+modal run workspace/code/run_eval_modal.py::download --which multinews --n 60
+modal run workspace/code/run_eval_modal.py::download --which hotpotqa --n 200
+modal run workspace/code/run_eval_modal.py::download --which hover --n 200
+modal run workspace/code/run_eval_modal.py::download --which multihop_rag --n 200
+```
+
+CPU container (no GPU bill), torch-free image, results stream back to the
+local `workspace/code/data/` directory automatically.
+
 **MultiHop-RAG note**: the `yixuantt/MultiHop-RAG` GitHub repo stores
 `MultiHopRAG.json` via Git LFS, so `raw.githubusercontent.com` returns only
 a 132-byte LFS pointer — not the actual 5 MB JSON. The fetcher uses the

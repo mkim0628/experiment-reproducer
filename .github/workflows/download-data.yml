@@ -1,0 +1,146 @@
+name: download-data
+
+# Manually-triggered workflow that downloads a HuggingFace / wiki-gated
+# dataset (multinews, hotpotqa, multihop_rag, hover) on a GitHub-hosted
+# runner -- which has full internet access -- and commits the resulting
+# JSON to `workspace/code/data/<which>.json` on the current branch.
+#
+# Why this exists: the Claude Code sandbox firewall blocks huggingface.co,
+# Wikipedia, and Modal infrastructure. GitHub Actions runners do not, so
+# they're the easiest way to materialize these datasets from a phone.
+#
+# Setup (one-time, per repo, doable from phone):
+#   1. Get an HF read token at https://huggingface.co/settings/tokens
+#   2. Repo -> Settings -> Secrets and variables -> Actions -> New repo
+#      secret. Name: HF_TOKEN. Value: hf_xxx...
+#   3. (You're done. Trigger via Actions tab -> "download-data" ->
+#      "Run workflow", choose the dataset and sample count.)
+
+on:
+  workflow_dispatch:
+    inputs:
+      which:
+        description: "Dataset to fetch"
+        required: true
+        default: "multinews"
+        type: choice
+        options:
+          - multinews
+          - hotpotqa
+          - multihop_rag
+          - hover
+          - all
+      n:
+        description: "Number of examples (60 = paper default for MultiNews; 200 = the others)"
+        required: false
+        default: "60"
+        type: string
+      seed:
+        description: "Random seed for stratified shuffle"
+        required: false
+        default: "0"
+        type: string
+      throttle:
+        description: "HoVer wiki API throttle (seconds between requests)"
+        required: false
+        default: "0.05"
+        type: string
+
+permissions:
+  contents: write  # to push the committed JSON back to the branch
+
+concurrency:
+  # One download job at a time per branch -- avoids two parallel runs both
+  # writing to multinews.json and racing on git push.
+  group: download-data-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30  # HoVer + wiki API is the slowest case (~5-10 min)
+
+    steps:
+      - name: Checkout (the branch the workflow was dispatched from)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          # We need a real commit (not a shallow detach) so we can push back.
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install download script dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Minimal install: just what download_extra_datasets.py imports.
+          # We deliberately do NOT install torch / transformers here -- this
+          # runner only fetches + reshapes JSON, it doesn't run the model.
+          pip install \
+            "datasets>=2.18" \
+            "huggingface_hub>=0.23" \
+            "pyyaml"
+
+      - name: Run downloader
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python workspace/code/scripts/download_extra_datasets.py \
+            --which "${{ inputs.which }}" \
+            --n "${{ inputs.n }}" \
+            --seed "${{ inputs.seed }}" \
+            --throttle "${{ inputs.throttle }}"
+
+      - name: Audit the produced JSON (label balance, schema, ctx counts)
+        run: python workspace/code/scripts/audit_datasets.py --data-dir workspace/code/data
+
+      - name: Show what was produced
+        run: |
+          echo "::group::data/ contents"
+          ls -la workspace/code/data/
+          echo "::endgroup::"
+          for f in workspace/code/data/*.json; do
+            n=$(python -c "import json,sys;print(len(json.load(open(sys.argv[1]))))" "$f" 2>/dev/null || echo "?")
+            sz=$(stat -c%s "$f" 2>/dev/null || echo "?")
+            echo "$(basename "$f"): n=$n size=$sz bytes"
+          done
+
+      - name: Commit & push (only if something changed)
+        run: |
+          set -eu
+          # Use the bundled github-actions[bot] identity so the commit
+          # doesn't impersonate the user.
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Stage every dataset JSON that was created or updated; the
+          # workspace/code/data/_wiki_cache.json (HoVer only) is also
+          # legitimately part of the dataset artifacts.
+          git add workspace/code/data/
+
+          if git diff --cached --quiet; then
+            echo "no changes to commit (file unchanged or already committed)"
+            exit 0
+          fi
+
+          # Use a heredoc so multi-line commit messages survive the YAML quoting.
+          MSG="data(${{ inputs.which }}): regenerate via GH Actions (n=${{ inputs.n }}, seed=${{ inputs.seed }})"
+          git commit -m "$MSG"
+
+          # Push retries (network blips are rare on GH runners, but cheap to guard).
+          for attempt in 1 2 3; do
+            if git push origin HEAD:${{ github.ref }}; then
+              echo "pushed (attempt $attempt)"
+              exit 0
+            fi
+            echo "push attempt $attempt failed; sleeping $((attempt * attempt))s"
+            sleep $((attempt * attempt))
+          done
+          echo "::error::all push attempts failed"
+          exit 1
