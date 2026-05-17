@@ -16,6 +16,11 @@ datasets:
     path: workspace/code/data/samsum.json
     n: 200
     metric: rouge_l
+  multinews:
+    path: workspace/code/data/multinews.json
+    n: 60               # paper's eval set size
+    metric: rouge_l
+    max_new_tokens: 200 # summaries are longer than QA answers
   # Extension datasets (Tier-1 multi-hop). Requires one-time fetch:
   #   python workspace/code/scripts/download_extra_datasets.py --which all
   hotpotqa:

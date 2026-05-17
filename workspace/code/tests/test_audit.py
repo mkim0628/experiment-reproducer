@@ -83,6 +83,43 @@ def test_audit_multihop_rag_warns_on_single_question_type() -> None:
     assert any("question_type" in w for w in warns)
 
 
+def test_audit_multinews_warns_on_single_article_examples() -> None:
+    # MultiNews is multi-document by definition; flag single-article rows.
+    rec_bad = {
+        "question": "",
+        "ctxs": [{"title": "Article 1", "text": "x" * 200}],
+        "answers": ["A long enough summary " * 5],
+    }
+    fails, warns = audit.audit_multinews([rec_bad] * 10)
+    assert any("< 2 source articles" in w for w in warns)
+
+
+def test_audit_multinews_warns_on_trivial_summaries() -> None:
+    rec_bad = {
+        "question": "",
+        "ctxs": [
+            {"title": "Article 1", "text": "x" * 200},
+            {"title": "Article 2", "text": "y" * 200},
+        ],
+        "answers": ["short"],
+    }
+    fails, warns = audit.audit_multinews([rec_bad] * 5)
+    assert any("short summaries" in w for w in warns)
+
+
+def test_audit_multinews_passes_on_realistic_input() -> None:
+    rec = {
+        "question": "",
+        "ctxs": [
+            {"title": "Article 1", "text": "first article body " * 50},
+            {"title": "Article 2", "text": "second article body " * 50},
+        ],
+        "answers": ["A 2-3 sentence summary covering both articles." * 3],
+    }
+    fails, warns = audit.audit_multinews([rec] * 60)
+    assert fails == [] and warns == []
+
+
 def test_audit_passes_for_bundled_wikimqa_shape() -> None:
     # Mimic the real wikimqa_s.json shape: 10 contexts, short single answer.
     rec = {

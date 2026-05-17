@@ -216,6 +216,86 @@ HOVER_DEV_URL = (
     "data/hover/hover_dev_release_v1.1.json"
 )
 
+MULTINEWS_HF_CANDIDATES = (
+    # The original config was deprecated; alexfabbri's mirror is the
+    # canonical one most pipelines use today.
+    ("alexfabbri/multi_news", None),
+    ("multi_news", None),
+)
+
+
+# --------------------------------------------------------- MultiNews
+def fetch_multinews(out_path: Path, n: int = 60, seed: int = 0) -> None:
+    """MultiNews (Fabbri et al., 2019): multi-document news summarization.
+
+    Each example's ``document`` field concatenates 2+ source articles with
+    a ``|||||`` separator (literal " ||||| " with whitespace). We split
+    on that, drop empty pieces, and emit one ``ctxs`` entry per article.
+    The summary becomes the only answer. Metric is Rouge-L.
+
+    Paper uses 60 examples (validation set); we apply a seeded shuffle so
+    the sample is reproducible and not biased toward whatever order the
+    HF mirror happens to use.
+    """
+    import random
+
+    try:
+        from datasets import load_dataset
+    except ImportError as e:  # pragma: no cover
+        raise SystemExit("`pip install datasets` required for MultiNews") from e
+
+    ds = None
+    last_err = None
+    for repo_id, _ in MULTINEWS_HF_CANDIDATES:
+        for split in ("validation", "test"):
+            try:
+                print(f"[multinews] load_dataset({repo_id}, split={split}) ...")
+                ds = load_dataset(repo_id, split=split, trust_remote_code=True)
+                break
+            except Exception as e:  # pragma: no cover
+                last_err = e
+                print(f"[multinews]   failed: {e!r}")
+        if ds is not None:
+            break
+
+    if ds is None:
+        raise SystemExit(
+            f"could not load MultiNews from any HF mirror. Last error: {last_err!r}"
+        )
+
+    # Seeded shuffle then take n.
+    rng = random.Random(seed)
+    indices = list(range(len(ds)))
+    rng.shuffle(indices)
+    indices = indices[: max(1, n)]
+    print(f"[multinews] shuffled sample: {len(indices)} examples (seed={seed})")
+
+    out: List[dict] = []
+    sep = "|||||"
+    for idx in indices:
+        ex = ds[idx]
+        doc = (ex.get("document") or "").strip()
+        if not doc:
+            continue
+        # Split on the literal separator; HF stores it with surrounding spaces.
+        articles = [a.strip() for a in doc.split(sep)]
+        articles = [a for a in articles if a]
+        if not articles:
+            continue
+        summary = (ex.get("summary") or "").strip()
+        if not summary:
+            continue
+        ctxs = [{"title": f"Article {i+1}", "text": a} for i, a in enumerate(articles)]
+        out.append(
+            {
+                "question": "",  # not used for MultiNews
+                "ctxs": ctxs,
+                "answers": [summary],
+            }
+        )
+    out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2))
+    print(f"[multinews] wrote {len(out)} examples -> {out_path}")
+
 
 def fetch_hover(out_path: Path, n: int = 200, throttle: float = 0.05, seed: int = 0) -> None:
     """HoVer dev split (from the official GitHub repo, NOT Git LFS) +
@@ -312,7 +392,7 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument(
         "--which",
-        choices=("hotpotqa", "multihop_rag", "hover", "all"),
+        choices=("hotpotqa", "multihop_rag", "hover", "multinews", "all"),
         default="all",
     )
     p.add_argument("--n", type=int, default=200)
@@ -327,6 +407,10 @@ def main() -> None:
         fetch_multihop_rag(DATA_DIR / "multihop_rag.json", n=args.n, seed=args.seed)
     if args.which in ("hover", "all"):
         fetch_hover(DATA_DIR / "hover.json", n=args.n, throttle=args.throttle, seed=args.seed)
+    if args.which in ("multinews", "all"):
+        # MultiNews uses the paper's 60-example eval set by default, not args.n
+        mn_n = 60 if args.which == "all" else args.n
+        fetch_multinews(DATA_DIR / "multinews.json", n=mn_n, seed=args.seed)
 
 
 if __name__ == "__main__":

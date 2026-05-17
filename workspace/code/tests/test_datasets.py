@@ -16,11 +16,13 @@ from eval.datasets import (
     QA_PREFIX,
     QA_QUERY,
     build_claim_verification_prompt,
+    build_multinews_prompt,
     build_qa_prompt,
     build_summarization_prompt,
     load_hotpotqa,
     load_hover,
     load_multihop_rag,
+    load_multinews,
     load_musique,
     load_samsum,
     load_wikimqa,
@@ -177,6 +179,46 @@ def test_claim_verification_metric_handles_label_variants() -> None:
     assert compute_claim_verification("idk", "SUPPORTED") == 0.0
     # Max over multiple golds.
     assert compute_claim_verification_max("SUPPORTED", ["NOT_SUPPORTED", "SUPPORTED"]) == 1.0
+
+
+# --------------------------------------------------------- MultiNews
+def test_multinews_loader_round_trip(tmp_path) -> None:
+    fixture = [
+        {
+            "question": "",
+            "ctxs": [
+                {"title": "Article 1", "text": "article one body"},
+                {"title": "Article 2", "text": "article two body"},
+                {"title": "Article 3", "text": "article three body"},
+            ],
+            "answers": ["A multi-paragraph summary."],
+        }
+    ]
+    p = tmp_path / "multinews.json"
+    _write_json(p, fixture)
+    examples = load_multinews(str(p))
+    assert len(examples) == 1
+    assert len(examples[0].contexts) == 3
+    assert examples[0].answers == ["A multi-paragraph summary."]
+
+
+def test_multinews_prompt_assembly() -> None:
+    ctxs = [
+        {"title": "Article 1", "text": "first news article body"},
+        {"title": "Article 2", "text": "second news article body"},
+    ]
+    full, chunks = build_multinews_prompt(ctxs)
+    assert full.startswith(INST_OPEN)
+    assert full.endswith(INST_CLOSE)
+    # Suffix asks for a summary.
+    assert "Summary:" in full
+    # The instruction text is folded into the first chunk so it's cacheable
+    # as a prefix in the cacheblend pipeline.
+    assert "Articles:" in chunks[0]
+    assert len(chunks) == 2
+    # join(chunks) + suffix == full (the contract every prompt builder honors)
+    suffix = full[sum(len(c) for c in chunks):]
+    assert full == "".join(chunks) + suffix
 
 
 # ----------------------- stratified sampling regression for HoVer bug

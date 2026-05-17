@@ -44,7 +44,13 @@ def _stats(records: List[dict]) -> dict:
     }
 
 
-def _check_schema(records: List[dict]) -> List[str]:
+def _check_schema(records: List[dict], require_question: bool = True) -> List[str]:
+    """Generic schema check.
+
+    ``require_question=False`` for datasets where the chunks themselves are
+    the input (e.g. MultiNews, where the model summarizes the articles with
+    no separate question).
+    """
     issues: List[str] = []
     for i, r in enumerate(records):
         if not isinstance(r, dict):
@@ -53,7 +59,7 @@ def _check_schema(records: List[dict]) -> List[str]:
         for k in ("question", "ctxs", "answers"):
             if k not in r:
                 issues.append(f"row {i}: missing key '{k}'")
-        if not r.get("question"):
+        if require_question and not r.get("question"):
             issues.append(f"row {i}: empty question")
         if not r.get("answers"):
             issues.append(f"row {i}: empty answers")
@@ -120,6 +126,30 @@ def audit_multihop_rag(records: List[dict]) -> Tuple[List[str], List[str]]:
     return fails, warns
 
 
+def audit_multinews(records: List[dict]) -> Tuple[List[str], List[str]]:
+    fails, warns = [], []
+    # MultiNews has no separate question field -- the articles ARE the input.
+    fails += _check_schema(records, require_question=False)
+    # Each MultiNews example must have >= 2 source articles by construction.
+    bad_ctx = sum(1 for r in records if len(r.get("ctxs", [])) < 2)
+    if bad_ctx:
+        warns.append(
+            f"{bad_ctx}/{len(records)} examples have < 2 source articles "
+            "(MultiNews is by definition multi-document)"
+        )
+    # Summary should be non-trivial (not a one-word answer).
+    short = sum(
+        1 for r in records if sum(len(a) for a in r.get("answers", [])) < 50
+    )
+    if short:
+        warns.append(
+            f"{short}/{len(records)} examples have suspiciously short summaries (< 50 chars)"
+        )
+    if len(records) < 30:
+        warns.append(f"only {len(records)} examples (paper uses 60)")
+    return fails, warns
+
+
 def audit_hover(records: List[dict]) -> Tuple[List[str], List[str]]:
     fails, warns = [], []
     fails += _check_schema(records)
@@ -156,6 +186,7 @@ AUDITS: Dict[str, Callable[[List[dict]], Tuple[List[str], List[str]]]] = {
     "hotpotqa": audit_hotpotqa,
     "multihop_rag": audit_multihop_rag,
     "hover": audit_hover,
+    "multinews": audit_multinews,
 }
 
 

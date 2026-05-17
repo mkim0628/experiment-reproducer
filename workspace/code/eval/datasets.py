@@ -156,6 +156,27 @@ def load_hover(path: str, n: Optional[int] = None) -> List[Example]:
     return out
 
 
+def load_multinews(path: str, n: Optional[int] = None) -> List[Example]:
+    """MultiNews (Fabbri et al., 2019) -- multi-document news summarization.
+
+    Each example has 2+ news articles as ``ctxs`` and a single gold summary
+    string in ``answers``. Same on-disk schema as ``samsum.json``. The
+    paper uses 60 examples; metric is Rouge-L.
+    """
+    data = _load_json(path)
+    out: List[Example] = []
+    for ex in data[: n if n else len(data)]:
+        out.append(
+            Example(
+                question=ex.get("question", ""),
+                contexts=ex["ctxs"],
+                answers=_flatten_answers(ex["answers"]),
+                metadata={"input": ex.get("input", "")},
+            )
+        )
+    return out
+
+
 # ----------------------------------------------------------------- chunking
 def chunk_text(text: str, tokenizer, chunk_size_tokens: int = 512) -> List[str]:
     """Naive token-budgeted chunking (no overlap)."""
@@ -231,5 +252,31 @@ def build_summarization_prompt(
         else:
             chunk_strs.append(body)
     query_str = "\n" + dialogue.strip() + "\nSummary:" + INST_CLOSE
+    full_prompt = "".join(chunk_strs) + query_str
+    return full_prompt, chunk_strs
+
+
+def build_multinews_prompt(contexts: List[dict]) -> tuple[str, List[str]]:
+    """MultiNews: multi-document news summarization.
+
+    Each context is one news article; the model is asked to write a
+    single summary covering all of them. We do NOT take a separate query
+    string -- the articles themselves are the input. The first chunk
+    carries the Mistral [INST] wrapping and a brief instruction; the
+    suffix asks for the summary.
+    """
+    mn_prefix = (
+        "Write a concise summary of the following news articles. "
+        "Cover the key facts in all articles in 2-4 sentences. "
+        "Do NOT output anything other than the summary.\n\n"
+        "Articles:\n"
+    )
+    mn_query = "\nSummary:"
+    chunk_strs: List[str] = []
+    first = INST_OPEN + " " + mn_prefix
+    for i, ctx in enumerate(contexts):
+        body = (ctx.get("text", "") or "").rstrip() + "\n\n"
+        chunk_strs.append((first if i == 0 else "") + body)
+    query_str = mn_query + INST_CLOSE
     full_prompt = "".join(chunk_strs) + query_str
     return full_prompt, chunk_strs

@@ -56,7 +56,7 @@ pip install -r requirements.txt
 cd workspace/code && pytest tests/ -q
 ```
 
-Expect 44 passing (25 algorithmic-equivalence gates + 5 K-deviation ablation tests + 5 extra-dataset loader/metric tests + 2 HoVer stratified-sampling regression tests + 7 audit-script tests). This is what `report.json` records as `unit_tests_full_suite`.
+Expect 49 passing (25 algorithmic-equivalence gates + 5 K-deviation ablation tests + 5 extra-dataset loader/metric tests + 2 MultiNews loader/prompt tests + 2 HoVer stratified-sampling regression tests + 7 audit-script tests + 3 MultiNews audit tests). This is what `report.json` records as `unit_tests_full_suite`.
 
 ### 3. Smoke run (requires CUDA GPU + `HF_TOKEN`)
 
@@ -103,6 +103,7 @@ similarly stratified by `question_type` so all four categories
 | HotpotQA | HF `hotpot_qa/distractor` | F1 | 2-hop bridge / comparison |
 | MultiHop-RAG | HF mirror `yixuantt/MultiHopRAG` | F1 | 2-4 hop news QA |
 | HoVer | `hover-nlp/hover` raw GitHub + Wikipedia REST | accuracy | 3-4 hop claim verification |
+| MultiNews | HF `alexfabbri/multi_news` | Rouge-L | multi-document news summarization (paper: 60 examples) |
 
 **MultiHop-RAG note**: the `yixuantt/MultiHop-RAG` GitHub repo stores
 `MultiHopRAG.json` via Git LFS, so `raw.githubusercontent.com` returns only

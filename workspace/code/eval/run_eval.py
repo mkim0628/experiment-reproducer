@@ -31,11 +31,13 @@ from cacheblend.selective_recompute import BlendConfig
 from eval.datasets import (
     Example,
     build_claim_verification_prompt,
+    build_multinews_prompt,
     build_qa_prompt,
     build_summarization_prompt,
     load_hotpotqa,
     load_hover,
     load_multihop_rag,
+    load_multinews,
     load_musique,
     load_samsum,
     load_wikimqa,
@@ -85,6 +87,8 @@ def _build_prompts(dataset_name: str, ex: Example):
         return build_summarization_prompt(dialogue, ex.contexts)
     if dataset_name == "hover":
         return build_claim_verification_prompt(ex.question, ex.contexts)
+    if dataset_name == "multinews":
+        return build_multinews_prompt(ex.contexts)
     raise ValueError(f"unknown dataset {dataset_name}")
 
 
@@ -101,6 +105,8 @@ def _load_dataset(name: str, path: str, n: int) -> List[Example]:
         return load_multihop_rag(path, n)
     if name == "hover":
         return load_hover(path, n)
+    if name == "multinews":
+        return load_multinews(path, n)
     raise ValueError(f"unknown dataset {name}")
 
 
@@ -127,14 +133,20 @@ def run_eval(config_path: str) -> dict:
             continue
         examples = _load_dataset(ds_name, ds_cfg["path"], ds_cfg["n"])
         metric = ds_cfg["metric"]
-        print(f"[run_eval] dataset={ds_name} n={len(examples)} metric={metric}")
+        # Per-dataset max_new_tokens override (e.g. MultiNews needs ~150-200
+        # tokens for a multi-doc summary; QA needs ~32).
+        ds_max_new = ds_cfg.get("max_new_tokens", max_new)
+        print(
+            f"[run_eval] dataset={ds_name} n={len(examples)} "
+            f"metric={metric} max_new_tokens={ds_max_new}"
+        )
 
         # full_recompute (no ratio dependence)
         store = ChunkKVStore(n_layers, dtype, device="cpu")
         scores_full = []
         for i, ex in enumerate(examples):
             full_prompt, _ = _build_prompts(ds_name, ex)
-            pred = full_recompute_generate(model, tokenizer, full_prompt, max_new)
+            pred = full_recompute_generate(model, tokenizer, full_prompt, ds_max_new)
             scores_full.append(_score(metric, pred, ex, tokenizer))
             if (i + 1) % 10 == 0:
                 print(f"  full_recompute {i+1}/{len(examples)} mean={np.mean(scores_full):.3f}")
@@ -152,7 +164,7 @@ def run_eval(config_path: str) -> dict:
             suffix_text = full_prompt[sum(len(c) for c in chunk_strs):]
             pred = full_reuse_generate(
                 model, tokenizer, chunk_strs, query="", store=store,
-                max_new_tokens=max_new, suffix=suffix_text,
+                max_new_tokens=ds_max_new, suffix=suffix_text,
             )
             scores_reuse.append(_score(metric, pred, ex, tokenizer))
         results.append({"dataset": ds_name, "strategy": "full_reuse", "ratio": None, "mean": float(np.mean(scores_reuse)), "n": len(scores_reuse)})
@@ -171,7 +183,7 @@ def run_eval(config_path: str) -> dict:
                 suffix_text = full_prompt[sum(len(c) for c in chunk_strs):]
                 pred = cacheblend_generate(
                     model, tokenizer, chunk_strs, query="", store=store,
-                    cfg=blend_cfg, max_new_tokens=max_new, suffix=suffix_text,
+                    cfg=blend_cfg, max_new_tokens=ds_max_new, suffix=suffix_text,
                 )
                 scores_cb.append(_score(metric, pred, ex, tokenizer))
             results.append({
