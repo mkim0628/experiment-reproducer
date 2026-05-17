@@ -1,8 +1,11 @@
 """Modal entrypoint for the TTFT (prefill latency) benchmark.
 
-Mirrors ``run_eval_modal.py`` but runs ``scripts.run_latency`` instead of
-``eval.run_eval``. Same image, same volumes (HF cache, results), same
-``Runner`` shape so ``with_options(gpu=...)`` works.
+Self-contained Modal app that mirrors ``run_eval_modal.py`` (same image,
+volumes, secret) but invokes ``scripts.run_latency`` instead of
+``eval.run_eval``. We duplicate the image/volume definitions rather than
+import from run_eval_modal because Modal places this script at /root/
+while the rest of the repo is mounted at /root/code/, so a module-level
+import would race the sys.path setup.
 
 Usage (from ``workspace/code/``)::
 
@@ -22,20 +25,58 @@ import sys
 
 import modal
 
-# Re-use the eval image/volumes verbatim so the build cache is shared.
-from run_eval_modal import (
-    image, hf_cache_vol, results_vol,
-    HF_CACHE_DIR, REMOTE_CODE_DIR, RESULTS_DIR, CODE_DIR,
-    _deep_merge,
+
+CODE_DIR = pathlib.Path(__file__).resolve().parent
+REMOTE_CODE_DIR = "/root/code"
+HF_CACHE_DIR = "/root/.cache/huggingface"
+RESULTS_DIR = "/root/results"
+
+# ---------------------------------------------------------------- image
+# Kept in sync with run_eval_modal.py so both apps share the same image
+# cache (same torch + transformers pins).
+image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .apt_install("git")
+    .pip_install(
+        "torch==2.7.1",
+        extra_index_url="https://download.pytorch.org/whl/cu124",
+    )
+    .pip_install(
+        "transformers==5.8.1",
+        "accelerate>=0.30",
+        "rouge_score>=0.1.2",
+        "numpy<2",
+        "tqdm",
+        "pyyaml",
+        "cbor2",
+        "sentencepiece",
+        "protobuf",
+    )
+    .add_local_dir(
+        str(CODE_DIR),
+        REMOTE_CODE_DIR,
+        ignore=["*.log", "__pycache__", "*.pyc", "results/", ".pytest_cache"],
+    )
 )
 
+hf_cache_vol = modal.Volume.from_name("cacheblend-hf-cache", create_if_missing=True)
+results_vol = modal.Volume.from_name("cacheblend-results", create_if_missing=True)
+
 app = modal.App("cacheblend-latency")
+
+
+def _deep_merge(base: dict, patch: dict) -> None:
+    for k, v in patch.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _deep_merge(base[k], v)
+        else:
+            base[k] = v
 
 
 # --------------------------------------------------------------- GPU class
 @app.cls(
     image=image,
-    gpu="L4",  # override via --gpu (see local_entrypoint)
+    gpu="L4",
     volumes={
         HF_CACHE_DIR: hf_cache_vol,
         RESULTS_DIR: results_vol,
@@ -91,7 +132,6 @@ class LatencyRunner:
 
         summary = run_latency(tmp_cfg, n_examples, warmup, repeats)
 
-        # Persist the JSON to the results volume.
         import time as _t
         run_id = _t.strftime("%Y%m%d_%H%M%S")
         out_path = pathlib.Path(RESULTS_DIR) / f"latency_{run_id}.json"
@@ -115,7 +155,7 @@ def main(
 ):
     """`mode` choices:
 
-        smoke -> nq_dpr only, n=3, 1 ratio (cheapest sanity check, < 5 min on L4)
+        smoke -> nq_dpr only, n=3, 1 ratio
         full  -> every dataset in the YAML that exists on disk
     """
     import yaml
@@ -162,7 +202,6 @@ def main(
             f"avg_chunks={sz['avg_num_chunks']} n={sz['n_examples_measured']}"
         )
         rows = []
-        base = ds["strategies"].get("full_recompute", {}).get("mean_ms")
         order = (
             ["full_recompute", "full_reuse"]
             + sorted(k for k in ds["strategies"] if k.startswith("cacheblend_"))
@@ -172,7 +211,11 @@ def main(
             if not v:
                 continue
             speedup = v.get("speedup_over_full_recompute")
-            sp_str = f"{speedup:>5.2f}x" if speedup else ("  1.00x" if k == "full_recompute" else "    --")
+            sp_str = (
+                f"{speedup:>5.2f}x"
+                if speedup
+                else ("  1.00x" if k == "full_recompute" else "    --")
+            )
             rows.append(
                 f"  {k:<18s} mean={v['mean_ms']:>7.1f}  "
                 f"p50={v['p50_ms']:>7.1f}  p95={v['p95_ms']:>7.1f}  speedup={sp_str}"
