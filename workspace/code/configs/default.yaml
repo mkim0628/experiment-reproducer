@@ -35,6 +35,12 @@ datasets:
     path: workspace/code/data/hover.json
     n: 200
     metric: claim_verification
+  # NQ-Open with DPR top-20 passages (~130-token chunks). Built by
+  # `scripts/build_nq_dpr_dataset.py` and committed under data/.
+  nq_dpr:
+    path: workspace/code/data/nq_dpr.json
+    n: 200
+    metric: f1
 
 strategy:
   recompute_ratios: [0.05, 0.10, 0.15, 0.18]

@@ -114,6 +114,27 @@ def load_hotpotqa(path: str, n: Optional[int] = None) -> List[Example]:
     return out
 
 
+def load_nq_dpr(path: str, n: Optional[int] = None) -> List[Example]:
+    """NQ-Open with DPR top-k passages (``scripts/build_nq_dpr_dataset.py``).
+
+    Same JSON schema as wikimqa_s.json: each row is
+    ``{"question", "ctxs": [{"title","text"}, ...], "answers"}``. ctxs
+    default to 20 DPR-retrieved Wikipedia passages per query (~130 tokens
+    each), so loader logic is identical to ``load_wikimqa``.
+    """
+    data = _load_json(path)
+    out: List[Example] = []
+    for ex in data[: n if n else len(data)]:
+        out.append(
+            Example(
+                question=ex["question"],
+                contexts=ex["ctxs"],
+                answers=_flatten_answers(ex["answers"]),
+            )
+        )
+    return out
+
+
 def load_multihop_rag(path: str, n: Optional[int] = None) -> List[Example]:
     """MultiHop-RAG (Tang & Yang, 2024).
 

@@ -39,6 +39,7 @@ from eval.datasets import (
     load_multihop_rag,
     load_multinews,
     load_musique,
+    load_nq_dpr,
     load_samsum,
     load_wikimqa,
 )
@@ -80,7 +81,7 @@ def _score(metric: str, pred: str, ex: Example, tokenizer) -> float:
 
 
 def _build_prompts(dataset_name: str, ex: Example):
-    if dataset_name in ("wikimqa", "musique", "hotpotqa", "multihop_rag"):
+    if dataset_name in ("wikimqa", "musique", "hotpotqa", "multihop_rag", "nq_dpr"):
         return build_qa_prompt(ex.question, ex.contexts)
     if dataset_name == "samsum":
         dialogue = ex.metadata.get("input", ex.question)
@@ -107,6 +108,8 @@ def _load_dataset(name: str, path: str, n: int) -> List[Example]:
         return load_hover(path, n)
     if name == "multinews":
         return load_multinews(path, n)
+    if name == "nq_dpr":
+        return load_nq_dpr(path, n)
     raise ValueError(f"unknown dataset {name}")
 
 
