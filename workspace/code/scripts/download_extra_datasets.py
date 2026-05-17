@@ -61,41 +61,77 @@ def fetch_hotpotqa(out_path: Path, n: int = 200) -> None:
 
 
 # --------------------------------------------------------- MultiHop-RAG
-MULTIHOP_URLS = [
-    "https://raw.githubusercontent.com/yixuantt/MultiHop-RAG/main/dataset/MultiHopRAG.json",
-    # Fallback name some forks use:
-    "https://raw.githubusercontent.com/yixuantt/MultiHop-RAG/main/dataset/multihop_rag.json",
-]
+# Notes on sources:
+# - The official `yixuantt/MultiHop-RAG` GitHub repo stores the dataset JSON
+#   files via Git LFS. The raw.githubusercontent.com URL therefore returns
+#   only a ~132-byte LFS pointer text, NOT the actual JSON. We must go
+#   through the HuggingFace mirror `yixuantt/MultiHopRAG` (which serves
+#   the real files), or pull from the LFS smudge endpoint via git-lfs.
+HF_MULTIHOP_REPO = "yixuantt/MultiHopRAG"
+HF_MULTIHOP_FILES = ("MultiHopRAG.json", "dataset/MultiHopRAG.json")
+
+
+def _hf_download(repo_id: str, filename: str, repo_type: str = "dataset") -> str:
+    """Wrap huggingface_hub.hf_hub_download with a clear error message."""
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as e:  # pragma: no cover
+        raise SystemExit(
+            "`pip install huggingface_hub` required for MultiHop-RAG / HoVer"
+        ) from e
+    return hf_hub_download(repo_id=repo_id, filename=filename, repo_type=repo_type)
 
 
 def fetch_multihop_rag(out_path: Path, n: int = 200) -> None:
-    """MultiHop-RAG: download the canonical JSON and reshape to our schema."""
-    import urllib.request
+    """MultiHop-RAG: pull the canonical JSON from the HF mirror.
+
+    The GitHub repo stores the file via Git LFS, so the raw URL is unusable
+    (returns a 132-byte pointer). We try the HF mirror first; if that fails,
+    we fall back to ``datasets.load_dataset`` which handles parquet-mirrored
+    variants automatically.
+    """
     from collections import OrderedDict
 
     data = None
-    for url in MULTIHOP_URLS:
+    last_err = None
+    for fname in HF_MULTIHOP_FILES:
         try:
-            print(f"[multihop_rag] GET {url}")
-            with urllib.request.urlopen(url, timeout=60) as r:
-                data = json.loads(r.read().decode("utf-8"))
+            print(f"[multihop_rag] hf_hub_download {HF_MULTIHOP_REPO}:{fname}")
+            local = _hf_download(HF_MULTIHOP_REPO, fname)
+            data = json.loads(Path(local).read_text(encoding="utf-8"))
             break
         except Exception as e:  # pragma: no cover
+            last_err = e
             print(f"[multihop_rag]   failed: {e!r}")
+
     if data is None:
-        raise SystemExit("could not download MultiHop-RAG JSON from any URL")
+        # Last-ditch: try loading as a regular HF dataset (parquet mirror).
+        try:
+            print(f"[multihop_rag] load_dataset({HF_MULTIHOP_REPO}) ...")
+            from datasets import load_dataset
+
+            ds = load_dataset(HF_MULTIHOP_REPO, split="train")
+            data = list(ds)
+        except Exception as e:  # pragma: no cover
+            last_err = e
+
+    if data is None:
+        raise SystemExit(
+            "Could not fetch MultiHop-RAG. The GitHub raw URL serves only "
+            "the LFS pointer; you need either huggingface_hub access to "
+            f"'{HF_MULTIHOP_REPO}' or a manually-downloaded MultiHopRAG.json "
+            f"placed at workspace/code/data/multihop_rag.json. Last error: {last_err!r}"
+        )
 
     n = min(n, len(data))
     out: List[dict] = []
     for ex in data[:n]:
-        # group evidence_list facts by source article.
         by_title: "OrderedDict[str, List[str]]" = OrderedDict()
         for ev in ex.get("evidence_list", []):
             title = ev.get("title") or ev.get("source") or ev.get("url") or ""
             fact = ev.get("fact", "")
             by_title.setdefault(title, []).append(fact)
         ctxs = [{"title": t or "Article", "text": "\n".join(fs)} for t, fs in by_title.items()]
-        # Skip queries with no usable evidence.
         if not ctxs:
             continue
         out.append(

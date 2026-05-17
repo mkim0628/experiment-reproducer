@@ -7,3 +7,5 @@ tqdm
 pyyaml
 pytest
 cbor2
+huggingface_hub
+datasets

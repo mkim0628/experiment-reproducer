@@ -89,10 +89,19 @@ cd workspace/code && python -m eval.run_eval --config configs/default.yaml
 | Dataset | Source | Metric | Task |
 |---|---|---|---|
 | HotpotQA | HF `hotpot_qa/distractor` | F1 | 2-hop bridge / comparison |
-| MultiHop-RAG | github.com/yixuantt/MultiHop-RAG | F1 | 2-4 hop news QA |
+| MultiHop-RAG | HF mirror `yixuantt/MultiHopRAG` | F1 | 2-4 hop news QA |
 | HoVer | HF `hover` + Wikipedia REST | accuracy | 3-4 hop claim verification |
 
-HoVer's wiki abstracts are cached to `workspace/code/data/_wiki_cache.json` between runs; the first fetch of 200 dev claims takes ~5-10 minutes due to throttling.
+**MultiHop-RAG note**: the `yixuantt/MultiHop-RAG` GitHub repo stores
+`MultiHopRAG.json` via Git LFS, so `raw.githubusercontent.com` returns only
+a 132-byte LFS pointer — not the actual 5 MB JSON. The fetcher uses the
+HuggingFace mirror `yixuantt/MultiHopRAG` instead. If your environment
+cannot reach HF either, download `MultiHopRAG.json` manually (e.g. via
+`git clone` + `git lfs pull` on the source repo) and place it at
+`workspace/code/data/multihop_rag.json` in the same schema as
+`wikimqa_s.json` — the loader will pick it up.
+
+**HoVer note**: wiki abstracts are cached to `workspace/code/data/_wiki_cache.json` between runs; the first fetch of 200 dev claims takes ~5-10 minutes due to throttling.
 
 ### 5. Deviation-mode (K / V / K+V)
 
