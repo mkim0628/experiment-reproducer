@@ -20,6 +20,10 @@ Usage (from `workspace/code/`):
     modal run run_eval_modal.py --mode full --gpu A10G
     modal run run_eval_modal.py --mode full --gpu A100
 
+    # use the paper's V-deviation HKVD selector (configs/default.yaml uses the
+    # K-deviation ablation; v matches the official vllm_blend release)
+    modal run run_eval_modal.py --mode full --deviation-mode v
+
 Cost-minimization choices baked in (see CLAUDE.md "Modal GPU cost rules"):
 - Defaults to L4 (cheapest GPU that fits Mistral-7B fp16 with 24 GB headroom).
 - HF weights cached on a Modal Volume so the second run skips ~14 GB download.
@@ -176,6 +180,7 @@ def main(
     gpu: str = "L4",
     config: str = "configs/default.yaml",
     n: int = 0,
+    deviation_mode: str = "",
     download_results: bool = True,
 ):
     """Local driver: build override, invoke the GPU function, download JSON.
@@ -190,7 +195,18 @@ def main(
         CLAUDE.md, only upgrade past L4 after a confirmed OOM.
     `n`   :
         Override examples-per-dataset across the whole grid (0 = use YAML).
+    `deviation_mode`:
+        Override ``strategy.deviation_mode`` in the YAML.
+        ``v`` matches the official vllm_blend release and the paper's
+        measured numbers (use this to reproduce Figure 16-style results).
+        ``k`` is the ablation default baked into ``configs/default.yaml``.
+        ``kv`` sums both. Empty string = use whatever the YAML says.
     """
+    if deviation_mode and deviation_mode not in ("v", "k", "kv"):
+        raise SystemExit(
+            f"unknown --deviation-mode {deviation_mode!r} (use 'v', 'k', or 'kv')"
+        )
+
     config_path = (CODE_DIR / config).resolve()
     cfg_text = config_path.read_text(encoding="utf-8")
 
@@ -214,6 +230,8 @@ def main(
         cfg_dict = yaml.safe_load(cfg_text)
         cfg_dict["datasets"] = override["datasets"]
         cfg_dict.setdefault("strategy", {}).update(override["strategy"])
+        if deviation_mode:
+            cfg_dict["strategy"]["deviation_mode"] = deviation_mode
         cfg_text = yaml.safe_dump(cfg_dict)
         override = {}
     elif mode == "full":
@@ -224,6 +242,8 @@ def main(
                 ds_cfg = dict(ds_cfg)
                 ds_cfg["n"] = n
                 override["datasets"][ds_name] = ds_cfg
+        if deviation_mode:
+            override.setdefault("strategy", {})["deviation_mode"] = deviation_mode
     else:
         raise SystemExit(f"unknown --mode {mode!r} (use 'smoke' or 'full')")
 
