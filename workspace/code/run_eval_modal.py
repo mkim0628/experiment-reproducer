@@ -60,12 +60,11 @@ image = (
         extra_index_url="https://download.pytorch.org/whl/cu121",
     )
     .pip_install(
-        # 4.55+ is needed for the DynamicCache.layers[*].keys/.values API the
-        # cacheblend baselines use. 4.50+ rewrote prepare_inputs_for_generation
-        # to derive `cache_position` from past_key_values; we pass it
-        # explicitly inside `full_reuse_generate` / `cacheblend_generate` so
-        # the latest 4.57.x works.
-        "transformers==4.57.0",
+        # transformers 5.8.1 is what produced the reference reuse=0.215 /
+        # cacheblend=0.266 / recompute=0.271 numbers on local A100. Earlier
+        # 4.57.x pins gave systematically lower full_reuse/cacheblend (the
+        # prefilled past_key_values path behaves differently on 4.5x).
+        "transformers==5.8.1",
         "accelerate>=0.30",
         "rouge_score>=0.1.2",
         "numpy<2",

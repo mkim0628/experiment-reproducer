@@ -194,11 +194,6 @@ def full_reuse_generate(
     attn_mask = torch.ones(
         (1, total_chunk_len + new_len), device=device, dtype=torch.long
     )
-    # transformers>=4.50 requires `cache_position` for prefilled caches; the
-    # new tokens occupy positions [total_chunk_len .. total_chunk_len+new_len).
-    cache_position = torch.arange(
-        total_chunk_len, total_chunk_len + new_len, device=device, dtype=torch.long
-    )
     out = model.generate(
         full_ids,
         attention_mask=attn_mask,
@@ -207,7 +202,6 @@ def full_reuse_generate(
         do_sample=False,
         use_cache=True,
         position_ids=new_position_ids,
-        cache_position=cache_position,
         pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
     )
     return _decode_new_tokens(tokenizer, out, full_ids.shape[1])
@@ -372,9 +366,6 @@ def cacheblend_generate(
     attn_mask = torch.ones(
         (1, total_chunk_len + suffix_query_ids.shape[1]), device=device, dtype=torch.long
     )
-    cache_position = torch.arange(
-        new_start, new_start + suffix_query_ids.shape[1], device=device, dtype=torch.long
-    )
     out = model.generate(
         suffix_query_ids,
         attention_mask=attn_mask,
@@ -383,7 +374,6 @@ def cacheblend_generate(
         do_sample=False,
         use_cache=True,
         position_ids=new_position_ids,
-        cache_position=cache_position,
         pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
     )
     return _decode_new_tokens(tokenizer, out, suffix_query_ids.shape[1])
