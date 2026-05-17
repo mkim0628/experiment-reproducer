@@ -1,0 +1,68 @@
+{
+  "musique": {
+    "dataset": "musique",
+    "n_examples": 150,
+    "chunks_per_query_min": 20,
+    "chunks_per_query_max": 20,
+    "chunks_per_query_target": 20,
+    "chunks_per_query_uniform": true,
+    "gold_substring_hits_source": 103,
+    "gold_substring_hits_extended": 103,
+    "gold_preservation_ratio_vs_source": 1.0,
+    "structural_chunk_preservation": 1.0,
+    "avg_chunk_chars": 2390.1,
+    "avg_chunk_tokens_estimated": 597.5,
+    "cacheblend_suitability": {
+      "checks": {
+        "chunks_per_query_ge_10": true,
+        "gold_preservation_vs_source_ge_0.99": true,
+        "structural_chunk_preservation_eq_1.0": true,
+        "chunk_size_within_paper_range_300_800_tokens": true
+      },
+      "verdict_pass": true,
+      "notes": [
+        "multi-hop QA inherited from source (MuSiQue / 2WikiMQA)",
+        "distractors sampled from other queries -> realistic cross-attention noise",
+        "F1 (short-answer) metric directly applicable",
+        "absolute substring hit < 100% reflects MuSiQue/2WikiMQA paraphrased answers, not our augmentation"
+      ]
+    },
+    "source_file": "musique_s.json",
+    "extra_per_query": 10,
+    "seed": 42,
+    "output_file": "/home/user/experiment-reproducer/workspace/code/data/musique_extended.json"
+  },
+  "wikimqa": {
+    "dataset": "wikimqa",
+    "n_examples": 200,
+    "chunks_per_query_min": 20,
+    "chunks_per_query_max": 20,
+    "chunks_per_query_target": 20,
+    "chunks_per_query_uniform": true,
+    "gold_substring_hits_source": 105,
+    "gold_substring_hits_extended": 109,
+    "gold_preservation_ratio_vs_source": 1.0381,
+    "structural_chunk_preservation": 1.0,
+    "avg_chunk_chars": 2242.2,
+    "avg_chunk_tokens_estimated": 560.5,
+    "cacheblend_suitability": {
+      "checks": {
+        "chunks_per_query_ge_10": true,
+        "gold_preservation_vs_source_ge_0.99": true,
+        "structural_chunk_preservation_eq_1.0": true,
+        "chunk_size_within_paper_range_300_800_tokens": true
+      },
+      "verdict_pass": true,
+      "notes": [
+        "multi-hop QA inherited from source (MuSiQue / 2WikiMQA)",
+        "distractors sampled from other queries -> realistic cross-attention noise",
+        "F1 (short-answer) metric directly applicable",
+        "absolute substring hit < 100% reflects MuSiQue/2WikiMQA paraphrased answers, not our augmentation"
+      ]
+    },
+    "source_file": "wikimqa_s.json",
+    "extra_per_query": 10,
+    "seed": 42,
+    "output_file": "/home/user/experiment-reproducer/workspace/code/data/wikimqa_extended.json"
+  }
+}
