@@ -1,7 +1,12 @@
-"""Modal entrypoint for the CacheBlend quality eval.
+"""Modal entrypoints for the CacheBlend reproduction.
 
-Runs `eval.run_eval.run_eval(...)` on a Modal GPU container, with HF weights
-and per-run outputs persisted on Modal Volumes so re-runs don't re-download.
+Two local entrypoints live here:
+
+* ``main`` (default) -- run the eval grid on a Modal GPU container.
+* ``download`` -- pull a dataset that needs huggingface.co / wiki API access
+  (multinews, hotpotqa, hover, multihop_rag) onto a CPU container and stream
+  the resulting JSON back to ``workspace/code/data/<which>.json``. Use this
+  when the local sandbox can't reach those hosts.
 
 Usage (from `workspace/code/`):
 
@@ -24,6 +29,12 @@ Usage (from `workspace/code/`):
     # K-deviation ablation; v matches the official vllm_blend release)
     modal run run_eval_modal.py --mode full --deviation-mode v
 
+    # fetch a dataset that needs HF / wiki egress (CPU container, no GPU bill)
+    modal run run_eval_modal.py::download --which multinews --n 60
+    modal run run_eval_modal.py::download --which hotpotqa --n 200
+    modal run run_eval_modal.py::download --which hover --n 200
+    modal run run_eval_modal.py::download --which multihop_rag --n 200
+
 Cost-minimization choices baked in (see CLAUDE.md "Modal GPU cost rules"):
 - Defaults to L4 (cheapest GPU that fits Mistral-7B fp16 with 24 GB headroom).
 - HF weights cached on a Modal Volume so the second run skips ~14 GB download.
@@ -33,6 +44,8 @@ Cost-minimization choices baked in (see CLAUDE.md "Modal GPU cost rules"):
   (`scaledown_window=60`, no `min_containers`).
 - `enable_memory_snapshot=True` so post-import CPU state is restored from
   snapshot on cold start.
+- ``download`` runs on a CPU container (gpu=None) with a torch-free image so
+  it never bills GPU time for plain dataset preprocessing.
 """
 from __future__ import annotations
 
@@ -91,6 +104,22 @@ image = (
 # Persist HF model weights and per-run results across container restarts.
 hf_cache_vol = modal.Volume.from_name("cacheblend-hf-cache", create_if_missing=True)
 results_vol = modal.Volume.from_name("cacheblend-results", create_if_missing=True)
+
+# Lightweight CPU-only image for dataset preprocessing (no torch / GPU build).
+# Reused across all download functions; ~30 s cold start vs the GPU image's ~90 s.
+download_image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .pip_install(
+        "datasets",
+        "huggingface_hub",
+        "pyyaml",
+    )
+    .add_local_dir(
+        str(CODE_DIR),
+        REMOTE_CODE_DIR,
+        ignore=["*.log", "__pycache__", "*.pyc", "results/", ".pytest_cache"],
+    )
+)
 
 app = modal.App("cacheblend-eval")
 
@@ -180,6 +209,100 @@ def _deep_merge(base: dict, patch: dict) -> None:
             _deep_merge(base[k], v)
         else:
             base[k] = v
+
+
+# --------------------------------------------------------------- dataset fetch
+# CPU-only function: pulls HuggingFace / wiki-API hosted datasets and converts
+# them to our standard schema. Used when the sandbox running the local
+# entrypoint can't reach huggingface.co directly (the typical Claude Code on
+# web situation -- see workspace/code/scripts/download_extra_datasets.py for
+# the actual fetcher implementations that we reuse).
+@app.function(
+    image=download_image,
+    gpu=None,
+    secrets=[modal.Secret.from_name("huggingface")],
+    timeout=20 * 60,        # 20 min hard cap (HoVer + wiki API takes the longest)
+    scaledown_window=60,
+)
+def fetch_dataset(which: str, n: int = 200, seed: int = 0, throttle: float = 0.05) -> str:
+    """Run a single fetcher on Modal and return the resulting JSON as a string.
+
+    ``which`` must be one of: ``hotpotqa``, ``multihop_rag``, ``hover``,
+    ``multinews``. The local entrypoint writes the returned text to
+    ``workspace/code/data/<which>.json``.
+    """
+    import pathlib as _pl
+    import sys as _sys
+
+    _sys.path.insert(0, REMOTE_CODE_DIR)
+    _sys.path.insert(0, os.path.join(REMOTE_CODE_DIR, "scripts"))
+
+    from download_extra_datasets import (
+        fetch_hotpotqa,
+        fetch_hover,
+        fetch_multihop_rag,
+        fetch_multinews,
+    )
+
+    out_path = _pl.Path(f"/tmp/{which}.json")
+    if which == "hotpotqa":
+        fetch_hotpotqa(out_path, n=n, seed=seed)
+    elif which == "multihop_rag":
+        fetch_multihop_rag(out_path, n=n, seed=seed)
+    elif which == "hover":
+        fetch_hover(out_path, n=n, throttle=throttle, seed=seed)
+    elif which == "multinews":
+        fetch_multinews(out_path, n=n, seed=seed)
+    else:
+        raise ValueError(
+            f"unknown dataset {which!r}; "
+            "expected one of: hotpotqa, multihop_rag, hover, multinews"
+        )
+    return out_path.read_text(encoding="utf-8")
+
+
+@app.local_entrypoint()
+def download(which: str = "multinews", n: int = 60, seed: int = 0, throttle: float = 0.05):
+    """Pull a dataset on Modal and write it to ``workspace/code/data/<which>.json``.
+
+    Use this when the local sandbox cannot reach huggingface.co / Wikipedia
+    (e.g. Claude Code on web with restrictive egress). Modal containers have
+    full internet egress and (for HF-gated repos) read the ``huggingface``
+    secret automatically.
+
+    Examples:
+
+        modal run run_eval_modal.py::download --which multinews --n 60
+        modal run run_eval_modal.py::download --which hotpotqa --n 200
+        modal run run_eval_modal.py::download --which hover --n 200 --throttle 0.05
+        modal run run_eval_modal.py::download --which multihop_rag --n 200
+    """
+    if which not in ("hotpotqa", "multihop_rag", "hover", "multinews"):
+        raise SystemExit(
+            f"unknown --which {which!r}; "
+            "expected one of: hotpotqa, multihop_rag, hover, multinews"
+        )
+
+    print(f"[local] fetching {which} (n={n}, seed={seed}) on Modal ...")
+    payload = fetch_dataset.remote(which, n=n, seed=seed, throttle=throttle)
+
+    out_path = CODE_DIR / "data" / f"{which}.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(payload, encoding="utf-8")
+
+    # Sanity stats so the user can sniff-test the result without reading JSON.
+    try:
+        records = json.loads(payload)
+        n_records = len(records)
+        sample_q = (records[0].get("question") or records[0].get("answers", [""])[0])[:100] if records else ""
+        ctxs = len(records[0].get("ctxs", [])) if records else 0
+        print(
+            f"[local] wrote {n_records} records to {out_path} "
+            f"({len(payload):,} bytes); first row has {ctxs} ctxs, "
+            f"sample={sample_q!r}"
+        )
+    except Exception:
+        print(f"[local] wrote {len(payload):,} bytes to {out_path}")
 
 
 # --------------------------------------------------------------- local entry
