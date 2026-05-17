@@ -56,8 +56,11 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git")
     .pip_install(
-        "torch==2.4.1",
-        extra_index_url="https://download.pytorch.org/whl/cu121",
+        # transformers 5.x uses newer torch._custom_op schema inference;
+        # 2.4.x lacks the required type registrations and raises ValueError
+        # on import. 2.7+ is required by transformers 5.8.1.
+        "torch==2.7.1",
+        extra_index_url="https://download.pytorch.org/whl/cu124",
     )
     .pip_install(
         # transformers 5.8.1 is what produced the reference reuse=0.215 /
