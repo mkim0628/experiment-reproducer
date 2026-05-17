@@ -151,18 +151,31 @@ def main(
     n: int = 0,
     warmup: int = 2,
     repeats: int = 5,
+    ratios: str = "",
     download_results: bool = True,
 ):
     """`mode` choices:
 
         smoke -> nq_dpr only, n=3, 1 ratio
         full  -> every dataset in the YAML that exists on disk
+
+    `ratios` overrides ``strategy.recompute_ratios`` as a comma-separated
+    list, e.g. ``--ratios 0,0.15,0.5,1``. Empty = use the YAML default.
     """
     import yaml
 
     config_path = (CODE_DIR / config).resolve()
     cfg_text = config_path.read_text(encoding="utf-8")
     cfg_dict = yaml.safe_load(cfg_text)
+
+    ratio_list: list[float] | None = None
+    if ratios:
+        try:
+            ratio_list = [float(x) for x in ratios.split(",") if x.strip()]
+        except ValueError:
+            raise SystemExit(f"could not parse --ratios {ratios!r}")
+        if any(not (0.0 <= r <= 1.0) for r in ratio_list):
+            raise SystemExit("each --ratios value must be in [0, 1]")
 
     if mode == "smoke":
         cfg_dict["datasets"] = {
@@ -172,7 +185,9 @@ def main(
                 "metric": "f1",
             }
         }
-        cfg_dict.setdefault("strategy", {})["recompute_ratios"] = [0.15]
+        cfg_dict.setdefault("strategy", {})["recompute_ratios"] = (
+            ratio_list if ratio_list is not None else [0.15]
+        )
         cfg_text = yaml.safe_dump(cfg_dict)
         n_examples = n or 3
     elif mode == "full":
@@ -180,13 +195,16 @@ def main(
         if n:
             for ds_cfg in cfg_dict.get("datasets", {}).values():
                 ds_cfg["n"] = n
-            cfg_text = yaml.safe_dump(cfg_dict)
+        if ratio_list is not None:
+            cfg_dict.setdefault("strategy", {})["recompute_ratios"] = ratio_list
+        cfg_text = yaml.safe_dump(cfg_dict)
     else:
         raise SystemExit(f"unknown --mode {mode!r} (use 'smoke' or 'full')")
 
     print(
         f"[local-latency] mode={mode} gpu={gpu} n_examples={n_examples} "
-        f"warmup={warmup} repeats={repeats}"
+        f"warmup={warmup} repeats={repeats} "
+        f"ratios={cfg_dict.get('strategy', {}).get('recompute_ratios')}"
     )
     Runner = LatencyRunner.with_options(gpu=gpu)
     summary = Runner().run_latency.remote(cfg_text, n_examples, warmup, repeats, None)
@@ -225,7 +243,11 @@ def main(
     if download_results:
         remote_path = summary.get("_remote_path", "")
         if remote_path:
-            local_dir = CODE_DIR.parent / "results"
+            # Drop the JSON into a tracked-in-git folder so latency runs can
+            # be inspected and committed. The eval gitignore explicitly
+            # ignores ``workspace/results/`` (per-eval-run dumps), so we
+            # use a sibling ``results/`` at the repo root instead.
+            local_dir = CODE_DIR.parent.parent / "results"
             local_dir.mkdir(parents=True, exist_ok=True)
             fname = pathlib.Path(remote_path).name
             local_path = local_dir / fname
