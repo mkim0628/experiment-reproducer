@@ -15,9 +15,10 @@ Usage (from `workspace/code/`):
     modal run run_eval_modal.py --mode full --n 50
     modal run run_eval_modal.py --mode smoke --n 2
 
-To change the GPU class (e.g. for an A10G upgrade after a confirmed OOM),
-edit the ``gpu=`` arg on ``@app.function`` below. Per CLAUDE.md, never
-default to anything more expensive than L4.
+    # override GPU class (default L4; only upgrade after a confirmed OOM,
+    # see CLAUDE.md "Modal GPU cost rules")
+    modal run run_eval_modal.py --mode full --gpu A10G
+    modal run run_eval_modal.py --mode full --gpu A100
 
 Cost-minimization choices baked in (see CLAUDE.md "Modal GPU cost rules"):
 - Defaults to L4 (cheapest GPU that fits Mistral-7B fp16 with 24 GB headroom).
@@ -81,8 +82,11 @@ results_vol = modal.Volume.from_name("cacheblend-results", create_if_missing=Tru
 app = modal.App("cacheblend-eval")
 
 
-# --------------------------------------------------------------- GPU function
-@app.function(
+# --------------------------------------------------------------- GPU class
+# Wrapped in `@app.cls` (not `@app.function`) so the local entrypoint can
+# pick the GPU class at call time via `Runner.with_options(gpu=...)`.
+# `Function.with_options` does not exist in modal>=1.4.
+@app.cls(
     image=image,
     # L4 = cheapest GPU that fits Mistral-7B fp16 with 24 GB headroom.
     # See CLAUDE.md "Modal GPU cost rules" before upgrading.
@@ -96,60 +100,62 @@ app = modal.App("cacheblend-eval")
     scaledown_window=60,        # shut down 60 s after the call returns
     enable_memory_snapshot=True,
 )
-def run_eval_remote(config_yaml: str, override: dict | None = None) -> dict:
-    """Execute the existing `eval.run_eval.run_eval` on this GPU container.
+class Runner:
+    @modal.method()
+    def run_eval(self, config_yaml: str, override: dict | None = None) -> dict:
+        """Execute the existing `eval.run_eval.run_eval` on this GPU container.
 
-    `config_yaml` is the *contents* (not path) of the config so we don't have
-    to ship config files separately. `override` is merged on top.
-    """
-    import yaml
+        `config_yaml` is the *contents* (not path) of the config so we don't have
+        to ship config files separately. `override` is merged on top.
+        """
+        import yaml
 
-    sys.path.insert(0, REMOTE_CODE_DIR)
-    os.chdir(REMOTE_CODE_DIR)
+        sys.path.insert(0, REMOTE_CODE_DIR)
+        os.chdir(REMOTE_CODE_DIR)
 
-    # HuggingFace cache → Volume.
-    os.environ.setdefault("HF_HOME", HF_CACHE_DIR)
-    os.environ.setdefault("TRANSFORMERS_CACHE", HF_CACHE_DIR)
+        # HuggingFace cache → Volume.
+        os.environ.setdefault("HF_HOME", HF_CACHE_DIR)
+        os.environ.setdefault("TRANSFORMERS_CACHE", HF_CACHE_DIR)
 
-    # GPU sanity check + log so we never silently bill for a CPU container.
-    import torch
+        # GPU sanity check + log so we never silently bill for a CPU container.
+        import torch
 
-    if not torch.cuda.is_available():
-        raise RuntimeError(
-            "CUDA not available inside Modal container; aborting before "
-            "we waste GPU billing time."
-        )
-    print(f"[modal] device={torch.cuda.get_device_name(0)} "
-          f"cuda={torch.version.cuda} torch={torch.__version__}")
-
-    cfg = yaml.safe_load(config_yaml)
-    if override:
-        _deep_merge(cfg, override)
-
-    # Force the output directory onto the results volume.
-    cfg.setdefault("output", {})["results_dir"] = RESULTS_DIR
-    # Make sure data paths are absolute (they're relative in the YAML).
-    for ds in cfg.get("datasets", {}).values():
-        p = ds.get("path")
-        if p and not os.path.isabs(p):
-            # YAML paths are relative to repo root ("workspace/code/data/...").
-            # Inside the container we mounted only `workspace/code/` at REMOTE_CODE_DIR,
-            # so strip that prefix.
-            ds["path"] = os.path.join(
-                REMOTE_CODE_DIR,
-                p.replace("workspace/code/", "", 1),
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA not available inside Modal container; aborting before "
+                "we waste GPU billing time."
             )
+        print(f"[modal] device={torch.cuda.get_device_name(0)} "
+              f"cuda={torch.version.cuda} torch={torch.__version__}")
 
-    # Write the resolved config to a tmp path that eval.run_eval expects.
-    tmp_path = "/tmp/run_eval_modal_config.yaml"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f)
+        cfg = yaml.safe_load(config_yaml)
+        if override:
+            _deep_merge(cfg, override)
 
-    from eval.run_eval import run_eval
+        # Force the output directory onto the results volume.
+        cfg.setdefault("output", {})["results_dir"] = RESULTS_DIR
+        # Make sure data paths are absolute (they're relative in the YAML).
+        for ds in cfg.get("datasets", {}).values():
+            p = ds.get("path")
+            if p and not os.path.isabs(p):
+                # YAML paths are relative to repo root ("workspace/code/data/...").
+                # Inside the container we mounted only `workspace/code/` at REMOTE_CODE_DIR,
+                # so strip that prefix.
+                ds["path"] = os.path.join(
+                    REMOTE_CODE_DIR,
+                    p.replace("workspace/code/", "", 1),
+                )
 
-    summary = run_eval(tmp_path)
-    results_vol.commit()
-    return summary
+        # Write the resolved config to a tmp path that eval.run_eval expects.
+        tmp_path = "/tmp/run_eval_modal_config.yaml"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f)
+
+        from eval.run_eval import run_eval
+
+        summary = run_eval(tmp_path)
+        results_vol.commit()
+        return summary
 
 
 def _deep_merge(base: dict, patch: dict) -> None:
@@ -167,6 +173,7 @@ def _deep_merge(base: dict, patch: dict) -> None:
 @app.local_entrypoint()
 def main(
     mode: str = "smoke",
+    gpu: str = "L4",
     config: str = "configs/default.yaml",
     n: int = 0,
     download_results: bool = True,
@@ -176,11 +183,13 @@ def main(
     `mode`:
         smoke -> wikimqa only, 1 ratio, n=3
         full  -> exactly what's in the YAML
+    `gpu` :
+        Modal GPU spec; default ``L4`` (cheapest GPU that fits Mistral-7B
+        fp16). Other valid values: ``T4`` (likely OOMs), ``L4``, ``A10G``,
+        ``L40S``, ``A100`` (= A100-40GB), ``A100-80GB``, ``H100``. Per
+        CLAUDE.md, only upgrade past L4 after a confirmed OOM.
     `n`   :
         Override examples-per-dataset across the whole grid (0 = use YAML).
-
-    GPU class is fixed in the ``@app.function`` decorator (L4). To upgrade,
-    edit the decorator after confirming an OOM on L4.
     """
     config_path = (CODE_DIR / config).resolve()
     cfg_text = config_path.read_text(encoding="utf-8")
@@ -218,8 +227,9 @@ def main(
     else:
         raise SystemExit(f"unknown --mode {mode!r} (use 'smoke' or 'full')")
 
-    print(f"[local] launching run_eval on Modal (mode={mode})")
-    summary = run_eval_remote.remote(cfg_text, override)
+    print(f"[local] launching run_eval on Modal (mode={mode}, gpu={gpu})")
+    RunnerWithGpu = Runner.with_options(gpu=gpu)
+    summary = RunnerWithGpu().run_eval.remote(cfg_text, override)
 
     # Show a compact result table in the local terminal.
     print("\n=== results ===")
