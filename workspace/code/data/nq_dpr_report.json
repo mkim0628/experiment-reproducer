@@ -1,0 +1,32 @@
+{
+  "dataset": "nq_dpr",
+  "n_examples": 200,
+  "chunks_per_query_min": 20,
+  "chunks_per_query_max": 20,
+  "chunks_per_query_target": 20,
+  "avg_chunk_chars": 607.9,
+  "avg_chunk_tokens_estimated": 152.0,
+  "min_chunk_tokens_estimated": 121.2,
+  "gold_has_answer_in_top_k": 164,
+  "gold_has_answer_in_top_k_ratio": 0.82,
+  "gold_substring_in_top_k": 150,
+  "gold_substring_in_top_k_ratio": 0.75,
+  "cacheblend_suitability": {
+    "checks": {
+      "chunks_per_query_ge_10": true,
+      "chunks_per_query_uniform_eq_target": true,
+      "has_answer_in_top_k_ge_0.50": true,
+      "min_chunk_tokens_ge_50": true
+    },
+    "verdict_pass": true,
+    "notes": [
+      "single-hop open-domain QA (NQ-Open); harder for full_reuse than for cacheblend because the answer is often in 1 of 20+ chunks",
+      "ctxs ordered by DPR retriever score (top-k retained)",
+      "chunk size ~130 tokens (DPR 100-word convention); shorter than the paper's 512-token chunks, but the CacheBlend algorithm is chunk-size agnostic",
+      "top-k recall against full top-100 = 91.11% (top-20 retains this fraction of queries that had a gold passage somewhere in the full 100-list)"
+    ]
+  },
+  "source": "https://dl.fbaipublicfiles.com/dpr/data/retriever_results/single/nq-test.json.gz",
+  "k": 20,
+  "n": 200
+}
