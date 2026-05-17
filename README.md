@@ -56,7 +56,7 @@ pip install -r requirements.txt
 cd workspace/code && pytest tests/ -q
 ```
 
-Expect 35 passing (25 algorithmic-equivalence gates + 5 K-deviation ablation tests + 5 extra-dataset loader/metric tests). This is what `report.json` records as `unit_tests_full_suite`.
+Expect 44 passing (25 algorithmic-equivalence gates + 5 K-deviation ablation tests + 5 extra-dataset loader/metric tests + 2 HoVer stratified-sampling regression tests + 7 audit-script tests). This is what `report.json` records as `unit_tests_full_suite`.
 
 ### 3. Smoke run (requires CUDA GPU + `HF_TOKEN`)
 
@@ -80,11 +80,23 @@ For longer-context / deeper multi-hop ablations:
 
 ```bash
 # One-time fetch (needs internet; HoVer hits the Wikipedia REST API)
-python workspace/code/scripts/download_extra_datasets.py --which all --n 200
+python workspace/code/scripts/download_extra_datasets.py --which all --n 200 --seed 0
+
+# Audit the produced JSON files (label balance, schema, ctx counts).
+# Exits non-zero on any FAIL, so it doubles as a CI gate.
+python workspace/code/scripts/audit_datasets.py --data-dir workspace/code/data
 
 # Then the same eval driver picks them up automatically.
 cd workspace/code && python -m eval.run_eval --config configs/default.yaml
 ```
+
+**Stratified sampling**: the raw HoVer dev JSON is sorted by label (first
+2000 = SUPPORTED, last 2000 = NOT_SUPPORTED), so a naive `n=200` slice
+gives 200 SUPPORTED / 0 NOT_SUPPORTED. The fetcher does a stratified
+sample (n/2 from each label, then seeded shuffle) so the produced
+`hover.json` is balanced 50/50 regardless of `n`. MultiHop-RAG is
+similarly stratified by `question_type` so all four categories
+(inference, comparison, temporal, null) are represented.
 
 | Dataset | Source | Metric | Task |
 |---|---|---|---|

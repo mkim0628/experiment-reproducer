@@ -32,8 +32,13 @@ WIKI_CACHE = DATA_DIR / "_wiki_cache.json"
 
 
 # --------------------------------------------------------- HotpotQA
-def fetch_hotpotqa(out_path: Path, n: int = 200) -> None:
-    """HotpotQA distractor validation split via HuggingFace datasets."""
+def fetch_hotpotqa(out_path: Path, n: int = 200, seed: int = 0) -> None:
+    """HotpotQA distractor validation split via HuggingFace datasets.
+
+    HF's hotpot_qa is typically already shuffled, but we apply a seeded
+    shuffle anyway to be defensive against any upstream ordering bias
+    (e.g. by question_type bridge vs. comparison).
+    """
     try:
         from datasets import load_dataset
     except ImportError as e:  # pragma: no cover
@@ -41,11 +46,11 @@ def fetch_hotpotqa(out_path: Path, n: int = 200) -> None:
 
     print(f"[hotpotqa] loading hotpot_qa/distractor (validation) ...")
     ds = load_dataset("hotpot_qa", "distractor", split="validation")
+    ds = ds.shuffle(seed=seed)
     n = min(n, len(ds))
     out: List[dict] = []
     for ex in ds.select(range(n)):
         ctx = ex["context"]
-        # context = {"title": [str], "sentences": [[str]]}.
         ctxs = []
         for title, sents in zip(ctx["title"], ctx["sentences"]):
             ctxs.append({"title": title, "text": "".join(sents)})
@@ -54,10 +59,12 @@ def fetch_hotpotqa(out_path: Path, n: int = 200) -> None:
                 "question": ex["question"],
                 "ctxs": ctxs,
                 "answers": [ex["answer"]],
+                "level": ex.get("level"),
+                "type": ex.get("type"),
             }
         )
     out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2))
-    print(f"[hotpotqa] wrote {len(out)} examples -> {out_path}")
+    print(f"[hotpotqa] wrote {len(out)} examples -> {out_path} (seed={seed})")
 
 
 # --------------------------------------------------------- MultiHop-RAG
@@ -82,15 +89,17 @@ def _hf_download(repo_id: str, filename: str, repo_type: str = "dataset") -> str
     return hf_hub_download(repo_id=repo_id, filename=filename, repo_type=repo_type)
 
 
-def fetch_multihop_rag(out_path: Path, n: int = 200) -> None:
-    """MultiHop-RAG: pull the canonical JSON from the HF mirror.
+def fetch_multihop_rag(out_path: Path, n: int = 200, seed: int = 0) -> None:
+    """MultiHop-RAG: pull the canonical JSON from the HF mirror, then
+    stratified-sample across ``question_type`` so each category
+    (inference, comparison, temporal, null) is represented.
 
     The GitHub repo stores the file via Git LFS, so the raw URL is unusable
     (returns a 132-byte pointer). We try the HF mirror first; if that fails,
-    we fall back to ``datasets.load_dataset`` which handles parquet-mirrored
-    variants automatically.
+    fall back to ``datasets.load_dataset``.
     """
-    from collections import OrderedDict
+    import random
+    from collections import OrderedDict, defaultdict
 
     data = None
     last_err = None
@@ -105,7 +114,6 @@ def fetch_multihop_rag(out_path: Path, n: int = 200) -> None:
             print(f"[multihop_rag]   failed: {e!r}")
 
     if data is None:
-        # Last-ditch: try loading as a regular HF dataset (parquet mirror).
         try:
             print(f"[multihop_rag] load_dataset({HF_MULTIHOP_REPO}) ...")
             from datasets import load_dataset
@@ -123,9 +131,27 @@ def fetch_multihop_rag(out_path: Path, n: int = 200) -> None:
             f"placed at workspace/code/data/multihop_rag.json. Last error: {last_err!r}"
         )
 
-    n = min(n, len(data))
+    # Stratified sample by question_type so all categories are represented.
+    by_type: Dict[str, List[dict]] = defaultdict(list)
+    for ex in data:
+        by_type[ex.get("question_type", "unknown")].append(ex)
+    rng = random.Random(seed)
+    for t in by_type:
+        rng.shuffle(by_type[t])
+    types = sorted(by_type.keys())
+    if not types:
+        raise SystemExit("MultiHop-RAG JSON parsed but produced 0 records")
+    per_type = max(1, n // len(types))
+    pool: List[dict] = []
+    for t in types:
+        pool.extend(by_type[t][:per_type])
+    rng.shuffle(pool)
+    pool = pool[:n]
+    cat_counts = {t: sum(1 for x in pool if x.get("question_type") == t) for t in types}
+    print(f"[multihop_rag] stratified sample by question_type: {cat_counts} (seed={seed})")
+
     out: List[dict] = []
-    for ex in data[:n]:
+    for ex in pool:
         by_title: "OrderedDict[str, List[str]]" = OrderedDict()
         for ev in ex.get("evidence_list", []):
             title = ev.get("title") or ev.get("source") or ev.get("url") or ""
@@ -191,7 +217,7 @@ HOVER_DEV_URL = (
 )
 
 
-def fetch_hover(out_path: Path, n: int = 200, throttle: float = 0.05) -> None:
+def fetch_hover(out_path: Path, n: int = 200, throttle: float = 0.05, seed: int = 0) -> None:
     """HoVer dev split (from the official GitHub repo, NOT Git LFS) +
     Wikipedia REST abstracts for the supporting articles.
 
@@ -200,10 +226,17 @@ def fetch_hover(out_path: Path, n: int = 200, throttle: float = 0.05) -> None:
     github.com/hover-nlp/hover is the canonical source and is served as a
     plain file (no LFS). We download it directly.
 
+    IMPORTANT: the dev JSON is sorted by label -- the first 2000 records
+    are all SUPPORTED, the last 2000 are all NOT_SUPPORTED. Taking the
+    leading n rows produces a 100% SUPPORTED subset. We do a STRATIFIED
+    sample (n/2 from each label, then deterministic shuffle) so the
+    resulting JSON has a balanced label distribution regardless of n.
+
     Schema of each record (per github.com/hover-nlp/hover):
         uid, claim, supporting_facts (list of [title, sent_id]),
         label ("SUPPORTED" | "NOT_SUPPORTED"), num_hops, hpqa_id
     """
+    import random
     import urllib.request
 
     print(f"[hover] GET {HOVER_DEV_URL}")
@@ -218,17 +251,33 @@ def fetch_hover(out_path: Path, n: int = 200, throttle: float = 0.05) -> None:
             f"could not download HoVer dev JSON from {HOVER_DEV_URL}: {e!r}"
         )
 
-    n = min(n, len(ds))
+    # Stratified sample: n/2 SUPPORTED + n/2 NOT_SUPPORTED, then shuffle.
+    by_label: Dict[str, List[dict]] = {"SUPPORTED": [], "NOT_SUPPORTED": []}
+    for ex in ds:
+        lbl = ex.get("label", "")
+        if lbl in by_label:
+            by_label[lbl].append(ex)
+    rng = random.Random(seed)
+    for lbl in by_label:
+        rng.shuffle(by_label[lbl])
+    half = max(1, n // 2)
+    pool = (by_label["SUPPORTED"][:half] + by_label["NOT_SUPPORTED"][n - half:][:n - half]) \
+        if n - half > 0 else by_label["SUPPORTED"][:half]
+    # Cleaner expression: take half of each, then interleave-shuffle.
+    pool = by_label["SUPPORTED"][:half] + by_label["NOT_SUPPORTED"][:n - half]
+    rng.shuffle(pool)
+    print(
+        f"[hover] stratified sample: SUPPORTED={sum(1 for x in pool if x['label']=='SUPPORTED')}, "
+        f"NOT_SUPPORTED={sum(1 for x in pool if x['label']=='NOT_SUPPORTED')} "
+        f"(seed={seed})"
+    )
+
     cache = _load_wiki_cache()
     out: List[dict] = []
-    for i, ex in enumerate(ds[:n]):
-        # supporting_facts is a list of [title, sent_id] pairs.
+    for i, ex in enumerate(pool):
         sf = ex.get("supporting_facts", [])
         titles: List[str] = sorted(
-            {
-                (x["key"] if isinstance(x, dict) else x[0])
-                for x in sf
-            }
+            {(x["key"] if isinstance(x, dict) else x[0]) for x in sf}
         )
         ctxs = []
         for t in titles:
@@ -249,7 +298,7 @@ def fetch_hover(out_path: Path, n: int = 200, throttle: float = 0.05) -> None:
         )
         if (i + 1) % 25 == 0:
             _save_wiki_cache(cache)
-            print(f"[hover]   {i+1}/{n} (kept {len(out)}) ...")
+            print(f"[hover]   {i+1}/{len(pool)} (kept {len(out)}) ...")
     _save_wiki_cache(cache)
     out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2))
     print(
@@ -267,16 +316,17 @@ def main() -> None:
         default="all",
     )
     p.add_argument("--n", type=int, default=200)
+    p.add_argument("--seed", type=int, default=0, help="seed for stratified sampling")
     p.add_argument("--throttle", type=float, default=0.05, help="HoVer wiki API throttle (seconds)")
     args = p.parse_args()
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if args.which in ("hotpotqa", "all"):
-        fetch_hotpotqa(DATA_DIR / "hotpotqa.json", n=args.n)
+        fetch_hotpotqa(DATA_DIR / "hotpotqa.json", n=args.n, seed=args.seed)
     if args.which in ("multihop_rag", "all"):
-        fetch_multihop_rag(DATA_DIR / "multihop_rag.json", n=args.n)
+        fetch_multihop_rag(DATA_DIR / "multihop_rag.json", n=args.n, seed=args.seed)
     if args.which in ("hover", "all"):
-        fetch_hover(DATA_DIR / "hover.json", n=args.n, throttle=args.throttle)
+        fetch_hover(DATA_DIR / "hover.json", n=args.n, throttle=args.throttle, seed=args.seed)
 
 
 if __name__ == "__main__":

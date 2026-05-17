@@ -177,3 +177,62 @@ def test_claim_verification_metric_handles_label_variants() -> None:
     assert compute_claim_verification("idk", "SUPPORTED") == 0.0
     # Max over multiple golds.
     assert compute_claim_verification_max("SUPPORTED", ["NOT_SUPPORTED", "SUPPORTED"]) == 1.0
+
+
+# ----------------------- stratified sampling regression for HoVer bug
+def _stratify_labels(records, n, seed):
+    """Pure-Python copy of the stratified logic in fetch_hover().
+
+    Tested separately so we don't have to import the download script (which
+    pulls in optional network deps like requests/datasets).
+    """
+    import random
+    from collections import defaultdict
+
+    by_label = defaultdict(list)
+    for ex in records:
+        by_label[ex["label"]].append(ex)
+    rng = random.Random(seed)
+    for lbl in by_label:
+        rng.shuffle(by_label[lbl])
+    half = max(1, n // 2)
+    pool = by_label["SUPPORTED"][:half] + by_label["NOT_SUPPORTED"][:n - half]
+    rng.shuffle(pool)
+    return pool
+
+
+def test_hover_stratified_sampling_balances_sorted_input() -> None:
+    """The real HoVer dev JSON is sorted by label (2000 SUPPORTED then 2000
+    NOT_SUPPORTED). A naive ``records[:200]`` slice produces 200 SUPPORTED
+    / 0 NOT_SUPPORTED -- the bug the user found. Stratified sampling must
+    produce ~50/50 regardless of input order.
+    """
+    sorted_records = (
+        [{"label": "SUPPORTED", "claim": f"s{i}"} for i in range(2000)]
+        + [{"label": "NOT_SUPPORTED", "claim": f"n{i}"} for i in range(2000)]
+    )
+
+    # Pre-fix baseline: naive slice = 200/0.
+    naive = sorted_records[:200]
+    assert sum(1 for x in naive if x["label"] == "SUPPORTED") == 200
+    assert sum(1 for x in naive if x["label"] == "NOT_SUPPORTED") == 0
+
+    # Post-fix: stratified slice = 100/100 deterministically with seed.
+    sample = _stratify_labels(sorted_records, n=200, seed=0)
+    n_sup = sum(1 for x in sample if x["label"] == "SUPPORTED")
+    n_not = sum(1 for x in sample if x["label"] == "NOT_SUPPORTED")
+    assert n_sup == 100, f"expected 100 SUPPORTED, got {n_sup}"
+    assert n_not == 100, f"expected 100 NOT_SUPPORTED, got {n_not}"
+    assert len(sample) == 200
+
+
+def test_hover_stratified_sampling_is_deterministic_under_seed() -> None:
+    sorted_records = (
+        [{"label": "SUPPORTED", "claim": f"s{i}"} for i in range(2000)]
+        + [{"label": "NOT_SUPPORTED", "claim": f"n{i}"} for i in range(2000)]
+    )
+    a = _stratify_labels(sorted_records, n=200, seed=42)
+    b = _stratify_labels(sorted_records, n=200, seed=42)
+    c = _stratify_labels(sorted_records, n=200, seed=43)
+    assert [x["claim"] for x in a] == [x["claim"] for x in b]
+    assert [x["claim"] for x in a] != [x["claim"] for x in c]
