@@ -74,8 +74,15 @@ image = (
         "sentencepiece",
         "protobuf",
     )
-    # Make local repo importable inside the container.
-    .add_local_dir(str(CODE_DIR), REMOTE_CODE_DIR)
+    # Make local repo importable inside the container. Exclude run-time
+    # artifacts (logs / __pycache__ / temporary results) so that a `tee
+    # smoke.log` running in parallel with the build doesn't trip Modal's
+    # "modified during build" safety check.
+    .add_local_dir(
+        str(CODE_DIR),
+        REMOTE_CODE_DIR,
+        ignore=["*.log", "__pycache__", "*.pyc", "results/", ".pytest_cache"],
+    )
 )
 
 # Persist HF model weights and per-run results across container restarts.
