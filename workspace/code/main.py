@@ -112,44 +112,29 @@ def _build_config_text(mode: str, n: int, deviation_mode: str, config: str) -> s
     return yaml.safe_dump(cfg)
 
 
-def run_eval_cerebrium(
-    mode: str = "smoke",
-    n: int = 0,
-    deviation_mode: str = "",
-    config: str = "configs/default.yaml",
-):
-    """Run the CacheBlend eval grid on a Cerebrium GPU container.
+def _prepare_container(deviation_mode: str) -> None:
+    """Shared per-call container setup for both eval and TTFT entrypoints.
 
-    Parameters map directly to ``cerebrium run main.py::run_eval_cerebrium --<key> <value>``
-    flags (and to JSON body keys when called as a deployed endpoint):
-
-    * ``mode``           -- ``smoke`` (wikimqa, n=3, ratio 0.15) or ``full``.
-    * ``n``              -- override examples-per-dataset (0 = use the YAML).
-    * ``deviation_mode`` -- HKVD selector: ``v`` (paper), ``k`` (ablation default
-                            in the YAML) or ``kv``. Empty = use the YAML.
-    * ``config``         -- config path relative to this dir.
+    Points HF cache + results at the persistent volume, surfaces the HF token
+    Cerebrium injects as a secret, makes the repo importable, and fails fast if
+    there is no GPU (so we never silently bill for a CPU box).
     """
     if deviation_mode and deviation_mode not in ("v", "k", "kv"):
         raise ValueError(f"unknown deviation_mode {deviation_mode!r} (use 'v', 'k' or 'kv')")
 
-    # --- HF cache + results onto the persistent volume ---------------------
     os.environ.setdefault("HF_HOME", HF_CACHE_DIR)
     os.environ.setdefault("TRANSFORMERS_CACHE", HF_CACHE_DIR)
     os.makedirs(HF_CACHE_DIR, exist_ok=True)
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
-    # Cerebrium injects secrets as env vars. Accept either common HF var name.
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if token:
         os.environ.setdefault("HF_TOKEN", token)
         os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", token)
 
-    # Make the repo importable and run from its root (paths in the YAML are
-    # relative to it).
     sys.path.insert(0, str(CODE_DIR))
     os.chdir(CODE_DIR)
 
-    # GPU sanity check -- fail fast so we never silently bill for a CPU box.
     import torch
 
     if not torch.cuda.is_available():
@@ -162,17 +147,19 @@ def run_eval_cerebrium(
         f"cuda={torch.version.cuda} torch={torch.__version__}"
     )
 
+
+def _resolve_config(mode: str, n: int, deviation_mode: str, config: str, tmp_path: str) -> str:
+    """Build the smoke/full config and rewrite paths onto the volume.
+
+    Writes the resolved YAML to ``tmp_path`` (the path ``run_eval`` / ``run_ttft``
+    consume) and returns it. Dataset paths in the YAML are repo-root relative
+    ("workspace/code/data/<f>.json"); prefer the copy uploaded to the volume's
+    DATA_DIR, falling back to a bundled copy under CODE_DIR if present.
+    """
     import yaml
 
-    cfg_text = _build_config_text(mode, n, deviation_mode, config)
-    cfg = yaml.safe_load(cfg_text)
-
-    # Force results onto the persistent volume.
+    cfg = yaml.safe_load(_build_config_text(mode, n, deviation_mode, config))
     cfg.setdefault("output", {})["results_dir"] = RESULTS_DIR
-    # Resolve each dataset path: YAML paths are repo-root relative
-    # ("workspace/code/data/<f>.json"). Prefer the copy uploaded to the volume's
-    # DATA_DIR (the data files are too big to ship in the run tar); fall back to
-    # a bundled copy under CODE_DIR if one happens to be present.
     for ds in cfg.get("datasets", {}).values():
         p = ds.get("path")
         if not p or os.path.isabs(p):
@@ -182,9 +169,31 @@ def run_eval_cerebrium(
         bundled_path = os.path.join(str(CODE_DIR), rel)
         ds["path"] = vol_path if os.path.exists(vol_path) else bundled_path
 
-    tmp_path = "/tmp/cerebrium_run_eval_config.yaml"
     with open(tmp_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f)
+    return tmp_path
+
+
+def run_eval_cerebrium(
+    mode: str = "smoke",
+    n: int = 0,
+    deviation_mode: str = "",
+    config: str = "configs/default.yaml",
+):
+    """Run the CacheBlend quality eval grid on a Cerebrium GPU container.
+
+    Parameters map directly to ``cerebrium run main.py::run_eval_cerebrium --<key> <value>``
+    flags (and to JSON body keys when called as a deployed endpoint):
+
+    * ``mode``           -- ``smoke`` (wikimqa, n=3, ratio 0.15) or ``full``.
+    * ``n``              -- override examples-per-dataset (0 = use the YAML).
+    * ``deviation_mode`` -- HKVD selector: ``v`` (paper), ``k`` (ablation default
+                            in the YAML) or ``kv``. Empty = use the YAML.
+    * ``config``         -- config path relative to this dir.
+    """
+    _prepare_container(deviation_mode)
+    tmp_path = _resolve_config(mode, n, deviation_mode, config,
+                               "/tmp/cerebrium_run_eval_config.yaml")
 
     from eval.run_eval import run_eval
 
@@ -204,6 +213,55 @@ def run_eval_cerebrium(
     # HTTP/response payload stays small.
     return {
         "mode": mode,
+        "results": summary.get("results", []),
+        "config": summary.get("config", {}),
+        "results_dir": RESULTS_DIR,
+    }
+
+
+def run_ttft_cerebrium(
+    mode: str = "smoke",
+    n: int = 0,
+    deviation_mode: str = "",
+    config: str = "configs/default.yaml",
+    repeats: int = 3,
+    warmup: int = 1,
+):
+    """Measure time-to-first-token (TTFT) on a Cerebrium GPU container.
+
+    The latency analogue of ``run_eval_cerebrium``: same smoke/full config
+    handling, but runs ``eval.run_ttft`` and returns per-(dataset,strategy,ratio)
+    TTFT in milliseconds plus speedup-vs-recompute.
+
+    * ``mode`` / ``n`` / ``deviation_mode`` / ``config`` -- as run_eval_cerebrium.
+    * ``repeats`` -- timed iterations per example (median taken).
+    * ``warmup``  -- untimed warmup iterations (also pre-warms the chunk store).
+
+    NOTE: this reproduction's ``cacheblend`` is a two-pass implementation, so its
+    TTFT is an upper bound, NOT the paper's single-pass selective-recompute
+    latency. The full_recompute vs full_reuse comparison is faithful.
+    """
+    _prepare_container(deviation_mode)
+    tmp_path = _resolve_config(mode, n, deviation_mode, config,
+                               "/tmp/cerebrium_run_ttft_config.yaml")
+
+    from eval.run_ttft import run_ttft
+
+    summary = run_ttft(tmp_path, repeats=repeats, warmup=warmup)
+
+    print("\n=== TTFT (ms) ===")
+    for row in summary.get("results", []):
+        ratio = row.get("ratio")
+        ratio_s = f"r={ratio:.2f}" if isinstance(ratio, (int, float)) else "-"
+        print(
+            f"  {row['dataset']:<14} {row['strategy']:<16} {ratio_s:<8} "
+            f"median={row['ttft_ms_median']:.1f}ms p90={row['ttft_ms_p90']:.1f}ms "
+            f"speedup={row['speedup_vs_recompute']:.2f}x n={row['n']}"
+        )
+
+    return {
+        "mode": mode,
+        "ttft": summary.get("ttft", {}),
         "results": summary.get("results", []),
         "config": summary.get("config", {}),
         "results_dir": RESULTS_DIR,
