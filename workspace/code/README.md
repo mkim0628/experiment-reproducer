@@ -8,6 +8,119 @@ The top-level [`/README.md`](../../README.md) is the user-facing entry point and
 records the reproduction verdict. This document is for developers extending the
 code.
 
+## Running the eval
+
+There are three ways to run the grid, all driven from this directory
+(`workspace/code/`) and all reusing the same core (`eval/run_eval.py`):
+
+| Path | When to use | Cost model |
+|---|---|---|
+| **Modal** | The full grid; easiest cloud GPU. Picks the GPU per call. | per-second GPU; cheap with caching |
+| **Cerebrium** | Cloud GPU as a persistent endpoint; async fire-and-forget. | per-second GPU; GPU fixed at deploy |
+| **Local server** | You already have a CUDA GPU box. | your hardware |
+
+All three need a HuggingFace token with access to the gated
+`mistralai/Mistral-7B-Instruct-v0.2` repo. `smoke` = wikimqa, n=3, ratio 0.15
+(pipeline sanity check, ~$0.03 on cloud L4); `full` = the YAML grid. Per
+[`CLAUDE.md`](../../CLAUDE.md), **always smoke before a full sweep**.
+
+### A. Modal (`run_eval_modal.py`)
+
+One-time:
+
+```bash
+cd workspace/code
+pip install modal
+modal token new                                                  # auth
+# HF token as a Modal secret named "huggingface" (keys HF_TOKEN + HUGGING_FACE_HUB_TOKEN):
+modal secret create huggingface HF_TOKEN=hf_xxx HUGGING_FACE_HUB_TOKEN=hf_xxx
+```
+
+Run:
+
+```bash
+modal run run_eval_modal.py --mode smoke                 # wikimqa n=3, ~couple min on L4
+modal run run_eval_modal.py --mode full                  # full grid from configs/default.yaml
+modal run run_eval_modal.py --mode full --n 50           # override examples/dataset
+modal run run_eval_modal.py --mode full --gpu A10G       # GPU override (default L4; see CLAUDE.md)
+modal run run_eval_modal.py --mode full --deviation-mode v   # paper's V-deviation HKVD selector
+```
+
+Modal **picks the GPU per call** via `--gpu` (default `L4`). Weights are cached
+on a Modal Volume so re-runs skip the ~14 GB download; one container loads the
+model once and runs the whole grid. The local entrypoint prints a result table
+and downloads the newest JSON to `workspace/results/` (plus `LATEST.json`).
+
+Datasets needing huggingface.co / wiki egress (multinews, hotpotqa, hover,
+multihop_rag) can be fetched on a CPU container (no GPU bill):
+
+```bash
+modal run run_eval_modal.py::download --which multinews --n 60
+modal run run_eval_modal.py::download --which hotpotqa --n 200
+```
+
+### B. Cerebrium (`main.py` + `cerebrium.toml`)
+
+Cerebrium is run as a **deployed persistent endpoint** invoked **async**, not
+via `cerebrium run` — the ephemeral path can't carry this workload (4 MB upload
+tar cap vs ~26 MB of data, no persistent volume so the 14 GB model re-downloads,
+and a fixed ~5–7 min polling timeout shorter than cold-start+eval).
+
+One-time:
+
+```bash
+cd workspace/code
+pip install cerebrium
+cerebrium login                                          # or set CEREBRIUM_SERVICE_ACCOUNT_TOKEN
+cerebrium secrets set HF_TOKEN hf_xxx                    # gated Mistral repo
+# datasets are NOT bundled (tar cap); upload to the volume once:
+cerebrium cp data/wikimqa_s.json cacheblend-data/wikimqa_s.json   # smoke needs only this
+cerebrium cp data/musique_s.json cacheblend-data/musique_s.json   # + samsum.json, nq_dpr.json for full
+cerebrium deploy                                         # build + deploy on the toml's GPU
+```
+
+Run (async wrapper, then read results off the volume):
+
+```bash
+scripts/run_cerebrium.sh --mode smoke                    # async POST
+scripts/run_cerebrium.sh --mode full --n 200
+scripts/run_cerebrium.sh --mode full --deviation-mode v
+SYNC=1 scripts/run_cerebrium.sh                          # wait for the JSON inline
+DRY_RUN=1 scripts/run_cerebrium.sh --mode full           # print request, send nothing (no GPU)
+
+cerebrium ls cacheblend-results/
+cerebrium download cacheblend-results/<id>.json
+```
+
+The GPU is set **at deploy time** in `cerebrium.toml` (`compute = "ADA_L4"`) —
+Cerebrium has **no per-call GPU override**, so to change GPU edit the toml and
+`cerebrium deploy` again. `min_replicas = 0` + `cooldown = 30` mean no idle GPU
+billing after a run; the model is cached on `/persistent-storage`. In the managed
+web env, `CEREBRIUM_SERVICE_ACCOUNT_TOKEN` / `CEREBRIUM_PROJECT_ID` are already
+set, so the wrapper works without `cerebrium login`. Set `CEREBRIUM_WEBHOOK_URL`
+to get a completion callback (otherwise the async run shows `processing` until
+the result JSON lands on the volume).
+
+### C. Local server (direct, no cloud)
+
+For a machine that already has an NVIDIA GPU + CUDA:
+
+```bash
+cd workspace/code
+pip install -r requirements.txt
+export HF_TOKEN=hf_xxx                                    # gated Mistral repo
+# datasets: wikimqa_s/musique_s/samsum are bundled under data/; fetch the rest with
+#   python scripts/download_extra_datasets.py --which all
+
+python -m scripts.run_smoke                               # 3-example wikimqa sanity run
+python -m eval.run_eval --config configs/default.yaml     # full grid -> workspace/results/<run_id>.json
+python -m eval.run_eval --config configs/default.yaml --deviation-mode v   # paper selector
+```
+
+`run_smoke` SKIPs gracefully (exit 0) when there's no GPU / no weights — the
+component tests in `tests/` still run CPU-only via `pytest`. `run_eval` writes
+per-run JSON to the `output.results_dir` in the YAML (`workspace/results/`).
+
 ## Module map
 
 ```
