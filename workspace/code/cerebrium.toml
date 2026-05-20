@@ -1,0 +1,86 @@
+# Cerebrium config for the CacheBlend reproduction.
+#
+# Mirrors the cost-minimisation choices baked into run_eval_modal.py
+# (see CLAUDE.md "Modal GPU cost rules" -- the same logic applies to any
+# per-second GPU platform):
+#
+#   * compute = ADA_L4 -> cheapest 24 GB GPU that fits Mistral-7B fp16.
+#     Only upgrade after a confirmed OOM (AMPERE_A10 -> AMPERE_A100_40GB -> ...).
+#   * min_replicas = 0 + short cooldown -> no idle GPU billing once the run ends.
+#   * HF weights are cached on the 50 GB persistent volume (/persistent-storage)
+#     by main.py, so a re-run skips the ~14 GB Mistral download.
+#   * one container loads the model once and runs the whole grid (the eval loop
+#     lives inside a single function call, not one call per cell).
+#
+# Deploy / run from THIS directory (workspace/code/):
+#   cerebrium login                                  # once
+#   cerebrium secrets set HF_TOKEN <hf_xxx>          # once (gated Mistral repo)
+#   cerebrium run main.py::run_eval_cerebrium --mode smoke   # ephemeral, ~$0.03
+#   cerebrium deploy                                 # persistent REST endpoint
+
+[cerebrium.deployment]
+name = "cacheblend-eval"
+python_version = "3.11"
+disable_auth = false
+# Ship the code + the small bundled datasets; skip the large *_extended dumps,
+# tests, logs and local results so the upload/build stays small.
+include = [
+    "main.py",
+    "cerebrium.toml",
+    "eval/*.py",
+    "cacheblend/*.py",
+    "configs/*.yaml",
+    "scripts/*.py",
+    "data/wikimqa_s.json",
+    "data/musique_s.json",
+    "data/samsum.json",
+    "data/nq_dpr.json",
+]
+exclude = [
+    ".*",
+    "tests/*",
+    "*.log",
+    "__pycache__/*",
+    "results/*",
+    ".pytest_cache/*",
+    "data/*_extended.json",
+]
+shell_commands = []
+
+[cerebrium.hardware]
+cpu = 4
+memory = 16.0
+# ADA_L4 = NVIDIA L4, 24 GB (Hobby+ plan). Cheapest GPU that fits Mistral-7B
+# fp16 with KV-cache headroom. See CLAUDE.md before changing.
+compute = "ADA_L4"
+gpu_count = 1
+provider = "aws"
+region = "us-east-1"
+
+[cerebrium.scaling]
+min_replicas = 0          # never keep a GPU warm 24/7
+max_replicas = 1          # one eval at a time; no accidental fan-out billing
+replica_concurrency = 1
+cooldown = 30             # scale the container down 30 s after the run ends
+# The default grace period is 3600 s (1 h); the full 6-dataset grid can run
+# ~2.5 h, so bump it. Hard cap is 12 h.
+response_grace_period = 10800
+
+[cerebrium.dependencies.pip]
+# Same pins as run_eval_modal.py: transformers 5.8.1 + torch 2.7.x produced the
+# reference reuse=0.215 / cacheblend=0.266 / recompute=0.271 numbers. PyPI's
+# torch 2.7.1 wheel is CUDA-enabled, so no extra index URL is needed here.
+torch = "==2.7.1"
+transformers = "==5.8.1"
+accelerate = ">=0.30"
+rouge_score = ">=0.1.2"
+numpy = "<2"
+tqdm = "latest"
+pyyaml = "latest"
+cbor2 = "latest"
+sentencepiece = "latest"
+protobuf = "latest"
+huggingface_hub = "latest"
+
+[cerebrium.dependencies.apt]
+git = "latest"
