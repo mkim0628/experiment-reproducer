@@ -48,9 +48,12 @@ Required setup the caller must provide
   repo, stored as a Cerebrium secret named ``HF_TOKEN``:
       cerebrium secrets set HF_TOKEN hf_xxx
   Cerebrium injects secrets as environment variables, which this module reads.
-"""
-from __future__ import annotations
 
+NOTE: do NOT add ``from __future__ import annotations`` here. Cerebrium binds
+request params by introspecting this function's signature and calling
+``isinstance(value, annotation)``; PEP 563 would turn the annotations into
+strings and break that with "isinstance() arg 2 must be a type".
+"""
 import json
 import os
 import pathlib
