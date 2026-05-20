@@ -60,6 +60,10 @@ CODE_DIR = pathlib.Path(__file__).resolve().parent
 PERSIST = "/persistent-storage"
 HF_CACHE_DIR = os.path.join(PERSIST, "hf-cache")
 RESULTS_DIR = os.path.join(PERSIST, "cacheblend-results")
+# Datasets live on the volume, NOT in the `cerebrium run` tar: the bundled
+# JSONs total ~26 MB and `cerebrium run` caps the upload tar at 4 MB. Upload
+# them once with `cerebrium cp data/<f>.json cacheblend-data/<f>.json`.
+DATA_DIR = os.path.join(PERSIST, "cacheblend-data")
 
 
 def _deep_merge(base: dict, patch: dict) -> None:
@@ -162,12 +166,18 @@ def run_eval_cerebrium(
 
     # Force results onto the persistent volume.
     cfg.setdefault("output", {})["results_dir"] = RESULTS_DIR
-    # YAML data paths are repo-root relative ("workspace/code/data/..."); this
-    # module ships only workspace/code/, so strip that prefix and absolutise.
+    # Resolve each dataset path: YAML paths are repo-root relative
+    # ("workspace/code/data/<f>.json"). Prefer the copy uploaded to the volume's
+    # DATA_DIR (the data files are too big to ship in the run tar); fall back to
+    # a bundled copy under CODE_DIR if one happens to be present.
     for ds in cfg.get("datasets", {}).values():
         p = ds.get("path")
-        if p and not os.path.isabs(p):
-            ds["path"] = os.path.join(str(CODE_DIR), p.replace("workspace/code/", "", 1))
+        if not p or os.path.isabs(p):
+            continue
+        rel = p.replace("workspace/code/", "", 1)
+        vol_path = os.path.join(DATA_DIR, os.path.basename(rel))
+        bundled_path = os.path.join(str(CODE_DIR), rel)
+        ds["path"] = vol_path if os.path.exists(vol_path) else bundled_path
 
     tmp_path = "/tmp/cerebrium_run_eval_config.yaml"
     with open(tmp_path, "w", encoding="utf-8") as f:

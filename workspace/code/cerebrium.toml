@@ -22,8 +22,13 @@
 name = "cacheblend-eval"
 python_version = "3.11"
 disable_auth = false
-# Ship the code + the small bundled datasets; skip the large *_extended dumps,
-# tests, logs and local results so the upload/build stays small.
+# Ship only code + configs. Datasets are NOT bundled: the JSONs total ~26 MB
+# and `cerebrium run` caps the upload tar at 4 MB. Upload them once to the
+# volume instead (main.py reads them from /persistent-storage/cacheblend-data):
+#   cerebrium cp data/wikimqa_s.json cacheblend-data/wikimqa_s.json
+#   cerebrium cp data/musique_s.json cacheblend-data/musique_s.json
+#   cerebrium cp data/samsum.json    cacheblend-data/samsum.json
+#   cerebrium cp data/nq_dpr.json    cacheblend-data/nq_dpr.json
 include = [
     "main.py",
     "cerebrium.toml",
@@ -31,10 +36,6 @@ include = [
     "cacheblend/*.py",
     "configs/*.yaml",
     "scripts/*.py",
-    "data/wikimqa_s.json",
-    "data/musique_s.json",
-    "data/samsum.json",
-    "data/nq_dpr.json",
 ]
 exclude = [
     ".*",
@@ -43,7 +44,7 @@ exclude = [
     "__pycache__/*",
     "results/*",
     ".pytest_cache/*",
-    "data/*_extended.json",
+    "data/*",
 ]
 shell_commands = []
 
