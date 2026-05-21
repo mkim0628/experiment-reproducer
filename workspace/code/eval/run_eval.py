@@ -113,13 +113,15 @@ def _load_dataset(name: str, path: str, n: int) -> List[Example]:
     raise ValueError(f"unknown dataset {name}")
 
 
-def run_eval(config_path: str) -> dict:
-    cfg = yaml.safe_load(open(config_path, "r", encoding="utf-8"))
-    _set_seed(cfg.get("seed", 42))
-    print(f"[run_eval] seed={cfg.get('seed', 42)} config={config_path}")
-    print(f"[run_eval] config: {json.dumps(cfg, indent=2)}")
+def measure_accuracy(model, tokenizer, dtype, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Accuracy phase: full-length generation + metric per (dataset, strategy, ratio).
 
-    model, tokenizer, device, dtype = _load_model(cfg)
+    Takes an already-loaded model/tokenizer so a combined driver
+    (see ``eval/run_combined.py``) can share a single model load across the
+    accuracy and TTFT phases. This does full-length generation and is never
+    timed, so in a combined driver it must run *after* the TTFT phase. Returns
+    the per-row result dicts; the caller owns serialization.
+    """
     n_layers = model.config.num_hidden_layers
     max_new = cfg["generation"]["max_new_tokens"]
     ratios = cfg["strategy"]["recompute_ratios"]
@@ -198,6 +200,17 @@ def run_eval(config_path: str) -> dict:
                 "n": len(scores_cb),
             })
             print(f"  cacheblend r={r} dev={deviation_mode}: mean={np.mean(scores_cb):.3f}")
+    return results
+
+
+def run_eval(config_path: str) -> dict:
+    cfg = yaml.safe_load(open(config_path, "r", encoding="utf-8"))
+    _set_seed(cfg.get("seed", 42))
+    print(f"[run_eval] seed={cfg.get('seed', 42)} config={config_path}")
+    print(f"[run_eval] config: {json.dumps(cfg, indent=2)}")
+
+    model, tokenizer, device, dtype = _load_model(cfg)
+    results = measure_accuracy(model, tokenizer, dtype, cfg)
 
     # ----- write JSON ---------------------------------------------------------
     out_dir = Path(cfg["output"]["results_dir"])

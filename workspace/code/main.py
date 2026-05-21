@@ -266,3 +266,59 @@ def run_ttft_cerebrium(
         "config": summary.get("config", {}),
         "results_dir": RESULTS_DIR,
     }
+
+
+def run_combined_cerebrium(
+    mode: str = "smoke",
+    n: int = 0,
+    deviation_mode: str = "",
+    config: str = "configs/default.yaml",
+    repeats: int = 3,
+    warmup: int = 1,
+):
+    """Measure accuracy AND TTFT in one Cerebrium GPU call, phases isolated.
+
+    Runs ``eval.run_combined``, which loads the model once (per CLAUDE.md cost
+    rules) and measures TTFT FIRST on a clean device, THEN accuracy -- so the
+    accuracy phase's full-length generation cannot perturb the TTFT numbers.
+    Returns merged per-(dataset,strategy,ratio) rows carrying both ``mean``
+    (accuracy) and ``ttft_ms_*`` / ``speedup_vs_recompute``.
+
+    * ``mode`` / ``n`` / ``deviation_mode`` / ``config`` -- as run_eval_cerebrium.
+    * ``repeats`` / ``warmup`` -- TTFT timed / warmup iterations, as run_ttft_cerebrium.
+
+    NOTE: cacheblend's TTFT here is a two-pass upper bound, not the paper's
+    single-pass selective-recompute latency. Accuracy is faithful for all three.
+    """
+    _prepare_container(deviation_mode)
+    tmp_path = _resolve_config(mode, n, deviation_mode, config,
+                               "/tmp/cerebrium_run_combined_config.yaml")
+
+    from eval.run_combined import run_combined
+
+    summary = run_combined(tmp_path, repeats=repeats, warmup=warmup)
+
+    print("\n=== accuracy + TTFT ===")
+    for row in summary.get("results", []):
+        ratio = row.get("ratio")
+        ratio_s = f"r={ratio:.2f}" if isinstance(ratio, (int, float)) else "-"
+        mean = row.get("mean")
+        mean_s = f"{mean:.3f}" if isinstance(mean, (int, float)) else "n/a"
+        ttft = row.get("ttft_ms_median")
+        ttft_s = f"{ttft:.1f}ms" if isinstance(ttft, (int, float)) else "n/a"
+        spd = row.get("speedup_vs_recompute")
+        spd_s = f"{spd:.2f}x" if isinstance(spd, (int, float)) else "n/a"
+        print(
+            f"  {row['dataset']:<14} {row['strategy']:<16} {ratio_s:<8} "
+            f"acc={mean_s} ttft={ttft_s} ({spd_s}) n={row.get('n')}"
+        )
+
+    return {
+        "mode": mode,
+        "ttft": summary.get("ttft", {}),
+        "phase_order": summary.get("phase_order", []),
+        "isolation": summary.get("isolation", ""),
+        "results": summary.get("results", []),
+        "config": summary.get("config", {}),
+        "results_dir": RESULTS_DIR,
+    }

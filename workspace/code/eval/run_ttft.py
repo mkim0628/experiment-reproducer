@@ -93,13 +93,16 @@ def _agg(per_example_ms: List[float]) -> Dict[str, float]:
     }
 
 
-def run_ttft(config_path: str, repeats: int = 3, warmup: int = 1) -> dict:
-    cfg = yaml.safe_load(open(config_path, "r", encoding="utf-8"))
-    _set_seed(cfg.get("seed", 42))
-    print(f"[run_ttft] seed={cfg.get('seed', 42)} config={config_path} "
-          f"repeats={repeats} warmup={warmup}")
+def measure_ttft(
+    model, tokenizer, dtype, cfg: dict, repeats: int = 3, warmup: int = 1
+) -> List[Dict[str, Any]]:
+    """TTFT phase: time first-token latency per (dataset, strategy, ratio).
 
-    model, tokenizer, device, dtype = _load_model(cfg)
+    Takes an already-loaded model/tokenizer so a combined driver can share a
+    single model load across the TTFT and accuracy phases (see
+    ``eval/run_combined.py``) instead of paying for a second 14 GB weight load.
+    Returns the per-row result dicts; the caller owns serialization.
+    """
     n_layers = model.config.num_hidden_layers
     ratios = cfg["strategy"]["recompute_ratios"]
     check_layer = cfg["strategy"]["check_layer"]
@@ -182,6 +185,17 @@ def run_ttft(config_path: str, repeats: int = 3, warmup: int = 1) -> dict:
                        and x["strategy"] == "cacheblend" and x["ratio"] == r)
             print(f"  cacheblend r={r} median={row['ttft_ms_median']:.1f}ms "
                   f"({row['speedup_vs_recompute']:.2f}x)")
+    return results
+
+
+def run_ttft(config_path: str, repeats: int = 3, warmup: int = 1) -> dict:
+    cfg = yaml.safe_load(open(config_path, "r", encoding="utf-8"))
+    _set_seed(cfg.get("seed", 42))
+    print(f"[run_ttft] seed={cfg.get('seed', 42)} config={config_path} "
+          f"repeats={repeats} warmup={warmup}")
+
+    model, tokenizer, device, dtype = _load_model(cfg)
+    results = measure_ttft(model, tokenizer, dtype, cfg, repeats=repeats, warmup=warmup)
 
     out_dir = Path(cfg["output"]["results_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
