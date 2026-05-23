@@ -55,6 +55,7 @@ from cacheblend.baselines import (
 )
 from cacheblend.kv_cache import ChunkKVStore
 from cacheblend.selective_recompute import BlendConfig
+from cacheblend.single_pass import cacheblend_selective_generate
 from eval.datasets import Example
 from eval.run_eval import _build_prompts, _load_dataset, _load_model, _set_seed
 
@@ -131,6 +132,7 @@ def measure_ttft(
         recompute_ms: List[float] = []
         reuse_ms: List[float] = []
         cb_ms: Dict[float, List[float]] = {r: [] for r in ratios}
+        cb_sel_ms: Dict[float, List[float]] = {r: [] for r in ratios}
 
         for ex in examples:
             full_prompt, chunk_strs = _build_prompts(ds_name, ex)
@@ -152,8 +154,17 @@ def measure_ttft(
                     recompute_ratio=r, check_layer=check_layer,
                     deviation_mode=deviation_mode,
                 )
+                # Two-pass cacheblend: faithful quality, but TTFT is an upper bound.
                 cb_ms[r].append(np.median(_time_call(
                     lambda bc=blend_cfg: cacheblend_generate(
+                        model, tokenizer, chunk_strs, query="", store=store,
+                        cfg=bc, max_new_tokens=max_new, suffix=suffix_text,
+                    ),
+                    repeats, warmup,
+                )))
+                # True single-pass selective recompute: the paper's TTFT path.
+                cb_sel_ms[r].append(np.median(_time_call(
+                    lambda bc=blend_cfg: cacheblend_selective_generate(
                         model, tokenizer, chunk_strs, query="", store=store,
                         cfg=bc, max_new_tokens=max_new, suffix=suffix_text,
                     ),
@@ -176,15 +187,25 @@ def measure_ttft(
                             "deviation_mode": deviation_mode, "n": len(cb_ms[r]),
                             "speedup_vs_recompute": rec_median / cb_agg["ttft_ms_median"],
                             **cb_agg})
+        for r in ratios:
+            sel_agg = _agg(cb_sel_ms[r])
+            results.append({"dataset": ds_name, "strategy": "cacheblend_selective", "ratio": r,
+                            "deviation_mode": deviation_mode, "n": len(cb_sel_ms[r]),
+                            "speedup_vs_recompute": rec_median / sel_agg["ttft_ms_median"],
+                            **sel_agg})
 
         print(f"  full_recompute median={rec_median:.1f}ms  "
               f"full_reuse median={reuse_agg['ttft_ms_median']:.1f}ms "
-              f"({results[-len(ratios)-1]['speedup_vs_recompute']:.2f}x)")
+              f"({reuse_agg['ttft_ms_median'] and rec_median / reuse_agg['ttft_ms_median']:.2f}x)")
         for r in ratios:
-            row = next(x for x in results if x["dataset"] == ds_name
-                       and x["strategy"] == "cacheblend" and x["ratio"] == r)
-            print(f"  cacheblend r={r} median={row['ttft_ms_median']:.1f}ms "
-                  f"({row['speedup_vs_recompute']:.2f}x)")
+            cb_row = next(x for x in results if x["dataset"] == ds_name
+                          and x["strategy"] == "cacheblend" and x["ratio"] == r)
+            sel_row = next(x for x in results if x["dataset"] == ds_name
+                           and x["strategy"] == "cacheblend_selective" and x["ratio"] == r)
+            print(f"  cacheblend(2pass) r={r} median={cb_row['ttft_ms_median']:.1f}ms "
+                  f"({cb_row['speedup_vs_recompute']:.2f}x)  "
+                  f"cacheblend_selective(1pass) median={sel_row['ttft_ms_median']:.1f}ms "
+                  f"({sel_row['speedup_vs_recompute']:.2f}x)")
     return results
 
 
@@ -204,8 +225,9 @@ def run_ttft(config_path: str, repeats: int = 3, warmup: int = 1) -> dict:
     summary = {
         "config": cfg,
         "ttft": {"repeats": repeats, "warmup": warmup, "max_new_tokens": 1,
-                 "note": "cacheblend is two-pass; its TTFT is an upper bound, "
-                         "not the paper's single-pass selective-recompute TTFT"},
+                 "note": "strategy 'cacheblend' is the two-pass impl (TTFT is an "
+                         "upper bound, not faithful); 'cacheblend_selective' is the "
+                         "true single-pass selective recompute (the paper's TTFT)"},
         "results": results,
     }
     with open(out_path, "w", encoding="utf-8") as f:

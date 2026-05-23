@@ -122,6 +122,11 @@ def _prepare_container(deviation_mode: str) -> None:
     if deviation_mode and deviation_mode not in ("v", "k", "kv"):
         raise ValueError(f"unknown deviation_mode {deviation_mode!r} (use 'v', 'k' or 'kv')")
 
+    # Reduce CUDA caching-allocator fragmentation. The single-pass validation
+    # cycles through several full-prompt KV caches per example; without this the
+    # allocator can hold ~enough freed-but-non-contiguous blocks to fail a small
+    # alloc on a 24 GB L4. Must be set before torch initializes CUDA.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     os.environ.setdefault("HF_HOME", HF_CACHE_DIR)
     os.environ.setdefault("TRANSFORMERS_CACHE", HF_CACHE_DIR)
     os.makedirs(HF_CACHE_DIR, exist_ok=True)
@@ -318,6 +323,75 @@ def run_combined_cerebrium(
         "ttft": summary.get("ttft", {}),
         "phase_order": summary.get("phase_order", []),
         "isolation": summary.get("isolation", ""),
+        "results": summary.get("results", []),
+        "config": summary.get("config", {}),
+        "results_dir": RESULTS_DIR,
+    }
+
+
+def run_singlepass_validate_cerebrium(
+    mode: str = "smoke",
+    n: int = 0,
+    deviation_mode: str = "",
+    config: str = "configs/default.yaml",
+    repeats: int = 3,
+    warmup: int = 1,
+    max_new_tokens: int = 32,
+    compare_twopass: bool = False,
+):
+    """Validate the TRUE single-pass selective recompute and report its TTFT.
+
+    Runs ``eval.validate_singlepass``, which (1) asserts single-pass at r=1.0
+    reproduces full_recompute token-for-token, (2) cross-checks single-pass vs
+    two-pass F1 at the config ratios, and (3) reports single-pass TTFT and its
+    speedup over full_recompute -- the paper-style selective-recompute latency
+    the two-pass path could not measure.
+
+    * ``mode`` / ``n`` / ``deviation_mode`` / ``config`` -- as run_eval_cerebrium.
+    * ``repeats`` / ``warmup`` -- TTFT timed / warmup iterations.
+    * ``max_new_tokens`` -- decode length for the r=1 exact-match + F1 checks.
+    """
+    _prepare_container(deviation_mode)
+    tmp_path = _resolve_config(mode, n, deviation_mode, config,
+                               "/tmp/cerebrium_singlepass_validate_config.yaml")
+
+    import json as _json
+    import time as _time
+
+    import yaml as _yaml
+
+    from eval.run_eval import _load_model, _set_seed
+    from eval.validate_singlepass import validate_singlepass
+
+    cfg = _yaml.safe_load(open(tmp_path, "r", encoding="utf-8"))
+    _set_seed(cfg.get("seed", 42))
+    model, tokenizer, device, dtype = _load_model(cfg)
+    summary = validate_singlepass(model, tokenizer, dtype, cfg,
+                                  repeats=repeats, warmup=warmup,
+                                  max_new_tokens=max_new_tokens,
+                                  compare_twopass=compare_twopass)
+
+    run_id = _time.strftime("%Y%m%d_%H%M%S") + "_singlepass_validate"
+    out_path = os.path.join(RESULTS_DIR, f"{run_id}.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        _json.dump(summary, f, indent=2)
+    print(f"[cerebrium] wrote {out_path}")
+
+    print("\n=== single-pass selective recompute ===")
+    for ds in summary.get("results", []):
+        print(f"  [{ds['dataset']}] r1 first-token match: "
+              f"{ds['r1_first_token_matches_full_forward']}  "
+              f"max|logit diff|={ds['r1_max_logit_diff_max']:.4f}  "
+              f"full_recompute TTFT={ds['ttft_full_recompute_median_ms']:.1f}ms")
+        for r, row in ds.get("cacheblend_selective", {}).items():
+            f2 = row.get("f1_twopass")
+            f2s = f"{f2:.3f}" if isinstance(f2, (int, float)) else "n/a"
+            print(f"    r={r}: TTFT={row['ttft_ms_median']:.1f}ms "
+                  f"({row['speedup_vs_recompute']:.2f}x)  "
+                  f"f1_single={row['f1_singlepass']:.3f} f1_two={f2s}")
+
+    return {
+        "mode": mode,
         "results": summary.get("results", []),
         "config": summary.get("config", {}),
         "results_dir": RESULTS_DIR,
