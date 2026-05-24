@@ -221,31 +221,59 @@ def measure_accuracy(model, tokenizer, dtype, cfg: Dict[str, Any]) -> List[Dict[
         scores_full, scores_reuse = [], []
         scores_cb: Dict[Tuple[str, float], List[float]] = {
             (sel, r): [] for sel in selection_modes for r in ratios}
+        n_skipped = 0
         for i, ex in enumerate(examples):
             full_prompt, chunk_strs = _build_prompts(ds_name, ex)
             suffix_text = _suffix_of(full_prompt, chunk_strs)
 
-            scores_full.append(_score(metric, full_recompute_generate(
-                model, tokenizer, full_prompt, ds_max_new), ex, tokenizer))
-            scores_reuse.append(_score(metric, full_reuse_generate(
-                model, tokenizer, chunk_strs, query="", store=store,
-                max_new_tokens=ds_max_new, suffix=suffix_text), ex, tokenizer))
-            for sel in selection_modes:
-                for r in ratios:
-                    bc = BlendConfig(recompute_ratio=r, check_layer=check_layer,
-                                     deviation_mode=deviation_mode,
-                                     selection=sel, mass_source=mass_source)
-                    scores_cb[(sel, r)].append(_score(metric, cacheblend_selective_generate(
-                        model, tokenizer, chunk_strs, query="", store=store,
-                        cfg=bc, max_new_tokens=ds_max_new, suffix=suffix_text), ex, tokenizer))
+            # Compute every strategy's score into temps first; only commit if the
+            # whole example succeeds, so a mid-example failure (e.g. an OOM on a
+            # long-context example) can't misalign the per-strategy score lists.
+            # One bad example is skipped, not fatal to the whole run.
+            try:
+                s_full = _score(metric, full_recompute_generate(
+                    model, tokenizer, full_prompt, ds_max_new), ex, tokenizer)
+                s_reuse = _score(metric, full_reuse_generate(
+                    model, tokenizer, chunk_strs, query="", store=store,
+                    max_new_tokens=ds_max_new, suffix=suffix_text), ex, tokenizer)
+                s_cb: Dict[Tuple[str, float], float] = {}
+                for sel in selection_modes:
+                    for r in ratios:
+                        bc = BlendConfig(recompute_ratio=r, check_layer=check_layer,
+                                         deviation_mode=deviation_mode,
+                                         selection=sel, mass_source=mass_source)
+                        s_cb[(sel, r)] = _score(metric, cacheblend_selective_generate(
+                            model, tokenizer, chunk_strs, query="", store=store,
+                            cfg=bc, max_new_tokens=ds_max_new, suffix=suffix_text),
+                            ex, tokenizer)
+            except Exception as e:  # noqa: BLE001 -- isolate one bad example
+                n_skipped += 1
+                print(f"[eval] WARN accuracy: skipping {ds_name} ex {i}: "
+                      f"{type(e).__name__}: {e}")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                continue
+
+            scores_full.append(s_full)
+            scores_reuse.append(s_reuse)
+            for key, val in s_cb.items():
+                scores_cb[key].append(val)
             if (i + 1) % 10 == 0:
                 print(f"  {i+1}/{len(examples)} full={np.mean(scores_full):.3f} "
-                      f"reuse={np.mean(scores_reuse):.3f}")
+                      f"reuse={np.mean(scores_reuse):.3f} skipped={n_skipped}")
 
+        if n_skipped:
+            print(f"[eval] accuracy: dataset={ds_name} skipped {n_skipped}/{len(examples)} "
+                  f"examples; means are over the {len(scores_full)} that ran")
+        if not scores_full:
+            print(f"[eval] accuracy: dataset={ds_name} ALL examples failed, no rows")
+            continue
         results.append({"dataset": ds_name, "strategy": "full_recompute", "ratio": None,
-                        "mean": float(np.mean(scores_full)), "n": len(scores_full)})
+                        "mean": float(np.mean(scores_full)), "n": len(scores_full),
+                        "n_skipped": n_skipped})
         results.append({"dataset": ds_name, "strategy": "full_reuse", "ratio": None,
-                        "mean": float(np.mean(scores_reuse)), "n": len(scores_reuse)})
+                        "mean": float(np.mean(scores_reuse)), "n": len(scores_reuse),
+                        "n_skipped": n_skipped})
         for sel in selection_modes:
             for r in ratios:
                 key = (sel, r)
@@ -288,30 +316,53 @@ def measure_ttft(
         recompute_ms, reuse_ms = [], []
         cb_ms: Dict[Tuple[str, float], List[float]] = {
             (sel, r): [] for sel in selection_modes for r in ratios}
+        n_skipped = 0
 
-        for ex in examples:
+        for i, ex in enumerate(examples):
             full_prompt, chunk_strs = _build_prompts(ds_name, ex)
             suffix_text = _suffix_of(full_prompt, chunk_strs)
 
-            recompute_ms.append(np.median(_time_call(
-                lambda: full_recompute_generate(model, tokenizer, full_prompt, max_new),
-                repeats, warmup)))
-            reuse_ms.append(np.median(_time_call(
-                lambda: full_reuse_generate(
-                    model, tokenizer, chunk_strs, query="", store=store,
-                    max_new_tokens=max_new, suffix=suffix_text),
-                repeats, warmup)))
-            for sel in selection_modes:
-                for r in ratios:
-                    bc = BlendConfig(recompute_ratio=r, check_layer=check_layer,
-                                     deviation_mode=deviation_mode,
-                                     selection=sel, mass_source=mass_source)
-                    cb_ms[(sel, r)].append(np.median(_time_call(
-                        lambda bc=bc: cacheblend_selective_generate(
-                            model, tokenizer, chunk_strs, query="", store=store,
-                            cfg=bc, max_new_tokens=max_new, suffix=suffix_text),
-                        repeats, warmup)))
+            # As in measure_accuracy: time every strategy into temps and commit
+            # atomically, so a single failing example is skipped (not fatal) and
+            # the per-strategy latency lists stay aligned across examples.
+            try:
+                rec = np.median(_time_call(
+                    lambda: full_recompute_generate(model, tokenizer, full_prompt, max_new),
+                    repeats, warmup))
+                reu = np.median(_time_call(
+                    lambda: full_reuse_generate(
+                        model, tokenizer, chunk_strs, query="", store=store,
+                        max_new_tokens=max_new, suffix=suffix_text),
+                    repeats, warmup))
+                cb_one: Dict[Tuple[str, float], float] = {}
+                for sel in selection_modes:
+                    for r in ratios:
+                        bc = BlendConfig(recompute_ratio=r, check_layer=check_layer,
+                                         deviation_mode=deviation_mode,
+                                         selection=sel, mass_source=mass_source)
+                        cb_one[(sel, r)] = np.median(_time_call(
+                            lambda bc=bc: cacheblend_selective_generate(
+                                model, tokenizer, chunk_strs, query="", store=store,
+                                cfg=bc, max_new_tokens=max_new, suffix=suffix_text),
+                            repeats, warmup))
+            except Exception as e:  # noqa: BLE001 -- isolate one bad example
+                n_skipped += 1
+                print(f"[eval] WARN ttft: skipping {ds_name} ex {i}: "
+                      f"{type(e).__name__}: {e}")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                continue
 
+            recompute_ms.append(rec)
+            reuse_ms.append(reu)
+            for key, val in cb_one.items():
+                cb_ms[key].append(val)
+
+        if n_skipped:
+            print(f"[eval] ttft: dataset={ds_name} skipped {n_skipped}/{len(examples)} examples")
+        if not recompute_ms:
+            print(f"[eval] ttft: dataset={ds_name} ALL examples failed, no rows")
+            continue
         rec_agg = _agg(recompute_ms)
         rec_median = rec_agg["ttft_ms_median"]
         results.append({"dataset": ds_name, "strategy": "full_recompute", "ratio": None,
