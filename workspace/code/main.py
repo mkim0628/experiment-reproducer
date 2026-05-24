@@ -7,17 +7,22 @@ ergonomics with ``cerebrium run``:
 
     # ephemeral one-off run (like `modal run`): packages this directory, runs on
     # the GPU set in cerebrium.toml (ADA_L4), streams logs back, then tears down.
-    cerebrium run main.py::run_eval_cerebrium --mode smoke
-    cerebrium run main.py::run_eval_cerebrium --mode full --n 50
-    cerebrium run main.py::run_eval_cerebrium --mode full --deviation_mode v
+    cerebrium run main.py::run_cerebrium --mode smoke
+    cerebrium run main.py::run_cerebrium --mode full --n 50
+    cerebrium run main.py::run_cerebrium --mode full --deviation_mode v
 
     # OR deploy once as a persistent REST endpoint and POST to it:
     cerebrium deploy
     curl -X POST \
-      https://api.aws.us-east-1.cerebrium.ai/v4/<PROJECT-ID>/cacheblend-eval/run_eval_cerebrium \
+      https://api.aws.us-east-1.cerebrium.ai/v4/<PROJECT-ID>/cacheblend-eval/run_cerebrium \
       -H 'Authorization: Bearer <JWT_TOKEN>' \
       -H 'Content-Type: application/json' \
       --data '{"mode": "smoke"}'
+
+``run_cerebrium`` measures BOTH accuracy and TTFT in one call (single-pass
+cacheblend, one model load). The headline numbers per (dataset, strategy, ratio)
+carry ``mean`` (accuracy) and ``ttft_ms_*`` / ``speedup_vs_recompute`` side by
+side. See ``eval/run_eval.py``.
 
 Results
 -------
@@ -156,8 +161,8 @@ def _prepare_container(deviation_mode: str) -> None:
 def _resolve_config(mode: str, n: int, deviation_mode: str, config: str, tmp_path: str) -> str:
     """Build the smoke/full config and rewrite paths onto the volume.
 
-    Writes the resolved YAML to ``tmp_path`` (the path ``run_eval`` / ``run_ttft``
-    consume) and returns it. Dataset paths in the YAML are repo-root relative
+    Writes the resolved YAML to ``tmp_path`` (the path ``eval.run_eval``
+    consumes) and returns it. Dataset paths in the YAML are repo-root relative
     ("workspace/code/data/<f>.json"); prefer the copy uploaded to the volume's
     DATA_DIR, falling back to a bundled copy under CODE_DIR if present.
     """
@@ -179,101 +184,7 @@ def _resolve_config(mode: str, n: int, deviation_mode: str, config: str, tmp_pat
     return tmp_path
 
 
-def run_eval_cerebrium(
-    mode: str = "smoke",
-    n: int = 0,
-    deviation_mode: str = "",
-    config: str = "configs/default.yaml",
-):
-    """Run the CacheBlend quality eval grid on a Cerebrium GPU container.
-
-    Parameters map directly to ``cerebrium run main.py::run_eval_cerebrium --<key> <value>``
-    flags (and to JSON body keys when called as a deployed endpoint):
-
-    * ``mode``           -- ``smoke`` (wikimqa, n=3, ratio 0.15) or ``full``.
-    * ``n``              -- override examples-per-dataset (0 = use the YAML).
-    * ``deviation_mode`` -- HKVD selector: ``v`` (paper), ``k`` (ablation default
-                            in the YAML) or ``kv``. Empty = use the YAML.
-    * ``config``         -- config path relative to this dir.
-    """
-    _prepare_container(deviation_mode)
-    tmp_path = _resolve_config(mode, n, deviation_mode, config,
-                               "/tmp/cerebrium_run_eval_config.yaml")
-
-    from eval.run_eval import run_eval
-
-    summary = run_eval(tmp_path)
-
-    # Compact table in the logs / response.
-    print("\n=== results ===")
-    for row in summary.get("results", []):
-        ratio = row.get("ratio")
-        ratio_s = f"r={ratio:.2f}" if isinstance(ratio, (int, float)) else "-"
-        print(
-            f"  {row['dataset']:<14} {row['strategy']:<16} {ratio_s:<8} "
-            f"mean={row['mean']:.3f} n={row['n']}"
-        )
-
-    # Return summary stats only (the full JSON already lives on the volume) so the
-    # HTTP/response payload stays small.
-    return {
-        "mode": mode,
-        "results": summary.get("results", []),
-        "config": summary.get("config", {}),
-        "results_dir": RESULTS_DIR,
-    }
-
-
-def run_ttft_cerebrium(
-    mode: str = "smoke",
-    n: int = 0,
-    deviation_mode: str = "",
-    config: str = "configs/default.yaml",
-    repeats: int = 3,
-    warmup: int = 1,
-):
-    """Measure time-to-first-token (TTFT) on a Cerebrium GPU container.
-
-    The latency analogue of ``run_eval_cerebrium``: same smoke/full config
-    handling, but runs ``eval.run_ttft`` and returns per-(dataset,strategy,ratio)
-    TTFT in milliseconds plus speedup-vs-recompute.
-
-    * ``mode`` / ``n`` / ``deviation_mode`` / ``config`` -- as run_eval_cerebrium.
-    * ``repeats`` -- timed iterations per example (median taken).
-    * ``warmup``  -- untimed warmup iterations (also pre-warms the chunk store).
-
-    ``cacheblend`` here is the single-pass selective recompute -- the SAME
-    function scored for accuracy in run_eval -- so its TTFT is the paper's
-    selective-recompute latency, comparable to full_recompute / full_reuse.
-    """
-    _prepare_container(deviation_mode)
-    tmp_path = _resolve_config(mode, n, deviation_mode, config,
-                               "/tmp/cerebrium_run_ttft_config.yaml")
-
-    from eval.run_ttft import run_ttft
-
-    summary = run_ttft(tmp_path, repeats=repeats, warmup=warmup)
-
-    print("\n=== TTFT (ms) ===")
-    for row in summary.get("results", []):
-        ratio = row.get("ratio")
-        ratio_s = f"r={ratio:.2f}" if isinstance(ratio, (int, float)) else "-"
-        print(
-            f"  {row['dataset']:<14} {row['strategy']:<16} {ratio_s:<8} "
-            f"median={row['ttft_ms_median']:.1f}ms p90={row['ttft_ms_p90']:.1f}ms "
-            f"speedup={row['speedup_vs_recompute']:.2f}x n={row['n']}"
-        )
-
-    return {
-        "mode": mode,
-        "ttft": summary.get("ttft", {}),
-        "results": summary.get("results", []),
-        "config": summary.get("config", {}),
-        "results_dir": RESULTS_DIR,
-    }
-
-
-def run_combined_cerebrium(
+def run_cerebrium(
     mode: str = "smoke",
     n: int = 0,
     deviation_mode: str = "",
@@ -282,51 +193,36 @@ def run_combined_cerebrium(
     warmup: int = 1,
     check_correctness: bool = False,
 ):
-    """Measure accuracy AND TTFT in one Cerebrium GPU call, phases isolated.
+    """Run the CacheBlend eval (accuracy AND TTFT) on a Cerebrium GPU container.
 
-    Runs ``eval.run_combined``, which loads the model once (per CLAUDE.md cost
-    rules) and measures TTFT FIRST on a clean device, THEN accuracy -- so the
-    accuracy phase's full-length generation cannot perturb the TTFT numbers.
-    Returns merged per-(dataset,strategy,ratio) rows carrying both ``mean``
-    (accuracy) and ``ttft_ms_*`` / ``speedup_vs_recompute``.
+    One entry point for the whole evaluation. ``eval.run_eval.run_combined``
+    loads the model once (per CLAUDE.md cost rules) and measures TTFT FIRST on a
+    clean device, THEN accuracy -- so the accuracy phase's full-length generation
+    cannot perturb the TTFT numbers. Returns merged per-(dataset,strategy,ratio)
+    rows carrying both ``mean`` (accuracy) and ``ttft_ms_*`` / ``speedup_vs_recompute``.
 
     ``cacheblend`` is the single-pass selective recompute: the SAME function is
     timed (TTFT) and scored (accuracy), so each row's acc/ttft come from one
     inference path -- the accuracy-drop vs TTFT-saving trade-off the paper
     reports, read off one implementation.
 
-    * ``mode`` / ``n`` / ``deviation_mode`` / ``config`` -- as run_eval_cerebrium.
-    * ``repeats`` / ``warmup`` -- TTFT timed / warmup iterations, as run_ttft_cerebrium.
+    * ``mode``           -- ``smoke`` (wikimqa, n=3, ratio 0.15) or ``full``.
+    * ``n``              -- override examples-per-dataset (0 = use the YAML).
+    * ``deviation_mode`` -- HKVD selector: ``v`` (paper), ``k`` (YAML default) or
+                            ``kv``. Empty = use the YAML.
+    * ``config``         -- config path relative to this dir.
+    * ``repeats`` / ``warmup`` -- TTFT timed / warmup iterations per example.
     * ``check_correctness`` -- first verify single-pass r=1 reproduces a full
       forward (bit-exact first-token logits) before the measured run.
     """
     _prepare_container(deviation_mode)
     tmp_path = _resolve_config(mode, n, deviation_mode, config,
-                               "/tmp/cerebrium_run_combined_config.yaml")
+                               "/tmp/cerebrium_run_config.yaml")
 
-    from eval.run_combined import run_combined
+    from eval.run_eval import run_combined
 
     summary = run_combined(tmp_path, repeats=repeats, warmup=warmup,
                            check_correctness=check_correctness)
-
-    corr = summary.get("correctness")
-    if corr is not None:
-        print(f"\n=== correctness: r1==full_forward={corr['r1_matches_full_forward']} "
-              f"(max|logit diff|={corr['max_logit_diff']:.4g}) ===")
-    print("\n=== accuracy + TTFT ===")
-    for row in summary.get("results", []):
-        ratio = row.get("ratio")
-        ratio_s = f"r={ratio:.2f}" if isinstance(ratio, (int, float)) else "-"
-        mean = row.get("mean")
-        mean_s = f"{mean:.3f}" if isinstance(mean, (int, float)) else "n/a"
-        ttft = row.get("ttft_ms_median")
-        ttft_s = f"{ttft:.1f}ms" if isinstance(ttft, (int, float)) else "n/a"
-        spd = row.get("speedup_vs_recompute")
-        spd_s = f"{spd:.2f}x" if isinstance(spd, (int, float)) else "n/a"
-        print(
-            f"  {row['dataset']:<14} {row['strategy']:<16} {ratio_s:<8} "
-            f"acc={mean_s} ttft={ttft_s} ({spd_s}) n={row.get('n')}"
-        )
 
     return {
         "mode": mode,

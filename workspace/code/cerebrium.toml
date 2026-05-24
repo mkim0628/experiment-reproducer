@@ -15,7 +15,7 @@
 # Deploy / run from THIS directory (workspace/code/):
 #   cerebrium login                                  # once
 #   cerebrium secrets set HF_TOKEN <hf_xxx>          # once (gated Mistral repo)
-#   cerebrium run main.py::run_eval_cerebrium --mode smoke   # ephemeral, ~$0.03
+#   cerebrium run main.py::run_cerebrium --mode smoke        # ephemeral, ~$0.05
 #   cerebrium deploy                                 # persistent REST endpoint
 
 [cerebrium.deployment]

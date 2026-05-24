@@ -4,9 +4,9 @@ cacheblend(r) on each dataset listed in a config YAML.
 Why this is its own script (not part of ``run_eval``):
 
 * This is the Modal-path *latency-model approximation* (driven by
-  ``run_latency_modal.py``). The Cerebrium eval path
-  (``eval/run_ttft.py`` / ``eval/run_combined.py``) instead times the real
-  single-pass ``cacheblend.single_pass.cacheblend_selective_generate``.
+  ``run_latency_modal.py``). The Cerebrium eval path (``eval/run_eval.py``)
+  instead times the real single-pass
+  ``cacheblend.single_pass.cacheblend_selective_generate``.
 * The approximation mirrors the paper's algorithmic cost (single forward,
   selective recompute):
 

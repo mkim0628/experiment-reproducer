@@ -79,17 +79,19 @@ cerebrium cp data/musique_s.json cacheblend-data/musique_s.json   # + samsum.jso
 cerebrium deploy                                         # build + deploy on the toml's GPU
 ```
 
-Run (async wrapper, then read results off the volume):
+Run (async wrapper, then read results off the volume). One entry point
+(`run_cerebrium`) measures BOTH accuracy and TTFT in one pass:
 
 ```bash
-scripts/run_cerebrium.sh --mode smoke                    # async POST
+scripts/run_cerebrium.sh --mode smoke                    # async POST (acc + TTFT)
 scripts/run_cerebrium.sh --mode full --n 200
 scripts/run_cerebrium.sh --mode full --deviation-mode v
+scripts/run_cerebrium.sh --mode smoke --check-correctness  # verify r=1==full forward first
 SYNC=1 scripts/run_cerebrium.sh                          # wait for the JSON inline
 DRY_RUN=1 scripts/run_cerebrium.sh --mode full           # print request, send nothing (no GPU)
 
 cerebrium ls cacheblend-results/
-cerebrium download cacheblend-results/<id>.json
+cerebrium download cacheblend-results/<id>_combined.json
 ```
 
 The GPU is set **at deploy time** in `cerebrium.toml` (`compute = "ADA_L4"`) —
@@ -113,13 +115,18 @@ export HF_TOKEN=hf_xxx                                    # gated Mistral repo
 #   python scripts/download_extra_datasets.py --which all
 
 python -m scripts.run_smoke                               # 3-example wikimqa sanity run
-python -m eval.run_eval --config configs/default.yaml     # full grid -> workspace/results/<run_id>.json
-python -m eval.run_eval --config configs/default.yaml --deviation-mode v   # paper selector
+python -m eval.run_eval --config configs/default.yaml     # accuracy + TTFT -> workspace/results/<run_id>_combined.json
+python -m eval.run_eval --config configs/default.yaml --check-correctness   # verify r=1==full forward first
+python -m eval.run_eval --config configs/default.yaml --accuracy-only       # accuracy only (Modal-style)
+python -m eval.run_eval --config configs/default.yaml --deviation-mode v    # paper HKVD selector
 ```
 
-`run_smoke` SKIPs gracefully (exit 0) when there's no GPU / no weights — the
-component tests in `tests/` still run CPU-only via `pytest`. `run_eval` writes
-per-run JSON to the `output.results_dir` in the YAML (`workspace/results/`).
+`eval.run_eval` is the single eval driver: it measures BOTH accuracy and TTFT
+in one pass (single-pass cacheblend, one model load), TTFT timed first on a
+clean device so the accuracy phase can't perturb it. `run_smoke` SKIPs
+gracefully (exit 0) when there's no GPU / no weights — the component tests in
+`tests/` still run CPU-only via `pytest`. Per-run JSON goes to the
+`output.results_dir` in the YAML (`workspace/results/`).
 
 ## Module map
 
@@ -129,14 +136,14 @@ workspace/code/
     __init__.py
     kv_cache.py            # ChunkKVStore: per-(chunk_hash, layer_id) CPU store with sha256_cbor hashing
     blend.py               # PositionalEncodingRecovery: re-applies rotary_emb to stored pre-RoPE K
-    selective_recompute.py # compute_v_deviation, select_hkvd_indices, BlendConfig, layer wrapper
+    selective_recompute.py # compute_kv_deviation, select_hkvd_indices, merge_selective_kv, BlendConfig
     precompute.py          # captures pre-RoPE K (via k_proj forward hook) and V per layer
     baselines.py           # full_recompute_generate / full_reuse_generate + fused-cache builder
     single_pass.py         # cacheblend_selective_generate: the single-pass selective recompute
   eval/
     datasets.py            # bundled-JSON loaders (wikimqa_s, musique_s, samsum) + official prompts
     metrics.py             # SQuAD-style token F1 + rouge_score Rouge-L (use_stemmer=True)
-    run_eval.py            # iterates (dataset x strategy x recompute_ratio) and writes JSON
+    run_eval.py            # the single eval driver: accuracy + TTFT per (dataset x strategy x ratio)
   scripts/
     run_smoke.py           # 3-example 2WikiMQA smoke run; SKIPs gracefully when no GPU
   configs/
@@ -176,7 +183,7 @@ property. These are the same "gates" the validator checks in
 | `test_kv_cache.py` | sha256_cbor hashing, dtype preservation | hash is deterministic; put/fetch is bit-exact; miss returns `None` |
 | `test_rope_recovery.py` | RoPE positional invariance (Appendix A) | re-rotation matches a direct HF forward at the new positions (fp32, < 1e-4) |
 | `test_hkvd_selector.py` | V-deviation + top-r% rule | per-token squared L2; `ceil(rN)` selection on synthetic vectors with known ordering |
-| `test_selective_recompute.py` | layer wrapper bounds | r=1.0 reproduces unmodified HF layer; r=0.0 reproduces full-reuse; in-place index_copy preserves unselected |
+| `test_selective_recompute.py` | selective merge bounds | r=1.0 selects all (full recompute); r=0.0 selects none (no-op); in-place index_copy preserves unselected |
 | `test_metrics.py` | scoring | `normalize_answer` strips articles+punct; F1 on canned pairs; Rouge-L on canned pairs |
 | `test_datasets.py` | data ingestion | loaders parse the bundled JSON; QA and SAMSum prompts assemble to the exact official strings |
 
@@ -249,8 +256,8 @@ hkvd = select_hkvd_indices(deviation, r)             # ceil(rN) indices
 # precomputed cache elsewhere). No second pass, no per-layer re-selection.
 ```
 
-Because it is one forward, the SAME call is scored for accuracy (`run_eval`)
-and timed for TTFT (`run_ttft`) -- the paper's accuracy-vs-TTFT trade-off is
+Because it is one forward, the SAME call is scored for accuracy and timed for
+TTFT (both in `eval.run_eval`) -- the paper's accuracy-vs-TTFT trade-off is
 read off one implementation. Correctness anchor: at `r=1` every token is HKVD,
 so the forward reduces to a plain full forward; `check_r1_matches_full_forward`
 asserts its first-token logits are bit-identical to `model(full_ids)`.

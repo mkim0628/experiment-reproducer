@@ -1,45 +1,57 @@
 #!/usr/bin/env bash
 #
-# Async-invoke the deployed CacheBlend eval on Cerebrium.
+# Async-invoke the deployed CacheBlend evaluation (accuracy + TTFT) on Cerebrium.
 #
-# The webhook completion callback is enabled BY DEFAULT whenever the
-# CEREBRIUM_WEBHOOK_URL env var is set: the script appends
-# "&webhookEndpoint=<url-encoded>" so Cerebrium POSTs the function's response
-# there on completion (otherwise the async run sits at "processing" in the
-# dashboard until you pull the result JSON off the volume).
+# Targets the single run_cerebrium function, which loads the model once and
+# measures TTFT FIRST (on a clean device) then accuracy -- so the accuracy
+# phase's full-length generation cannot perturb the TTFT numbers. The webhook
+# completion callback is enabled BY DEFAULT whenever CEREBRIUM_WEBHOOK_URL is set.
+#
+# cacheblend is the single-pass selective recompute -- the SAME function is timed
+# (TTFT) and scored (accuracy), so each row's acc/ttft come from one inference
+# path (the paper's accuracy-vs-TTFT trade-off, one implementation). Pass
+# --check-correctness to first verify r=1 reproduces a full forward.
+# See eval/run_eval.py.
 #
 # Usage:
-#   ./run_cerebrium.sh                          # mode=smoke (async)
-#   ./run_cerebrium.sh --mode full --n 200
-#   ./run_cerebrium.sh --mode full --deviation-mode v
-#   SYNC=1 ./run_cerebrium.sh                    # wait for the JSON response (no async/webhook)
-#   DRY_RUN=1 ./run_cerebrium.sh --mode full --n 50   # print the request, don't send it
+#   ./run_cerebrium.sh                              # mode=smoke (async)
+#   ./run_cerebrium.sh --mode full --n 50
+#   ./run_cerebrium.sh --mode smoke --repeats 5 --warmup 2
+#   ./run_cerebrium.sh --mode smoke --check-correctness
+#   SYNC=1 ./run_cerebrium.sh                       # wait for the JSON response inline
+#   DRY_RUN=1 ./run_cerebrium.sh --mode full        # print the request, don't send it
 #
 # Required env:
 #   CEREBRIUM_SERVICE_ACCOUNT_TOKEN   bearer token (already set in the managed env)
 #   CEREBRIUM_PROJECT_ID              e.g. p-238b3475 (already set in the managed env)
 # Optional env:
-#   CEREBRIUM_WEBHOOK_URL             completion callback target; set once to make webhooks the default
+#   CEREBRIUM_WEBHOOK_URL             completion callback target
 #   CEREBRIUM_APP                     default: cacheblend-eval
 #   CEREBRIUM_REGION                  default: aws.us-east-1
-#   CEREBRIUM_FUNCTION                default: run_eval_cerebrium
+#   CEREBRIUM_FUNCTION                default: run_cerebrium
 #
-# After an async run, fetch results from the volume:
+# After an async run, fetch the JSON (file name ends in _combined.json):
 #   cerebrium ls cacheblend-results/
-#   cerebrium download cacheblend-results/<id>.json
+#   cerebrium download cacheblend-results/<id>_combined.json
 set -euo pipefail
 
 MODE=smoke
 N=""
 DEV=""
 CONFIG=""
+REPEATS=""
+WARMUP=""
+CHECK=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --mode)            MODE="$2";   shift 2;;
-    --n)               N="$2";      shift 2;;
-    --deviation-mode)  DEV="$2";    shift 2;;
-    --config)          CONFIG="$2"; shift 2;;
-    -h|--help)         sed -n '2,30p' "$0"; exit 0;;
+    --mode)              MODE="$2";    shift 2;;
+    --n)                 N="$2";       shift 2;;
+    --deviation-mode)    DEV="$2";     shift 2;;
+    --config)            CONFIG="$2";  shift 2;;
+    --repeats)           REPEATS="$2"; shift 2;;
+    --warmup)            WARMUP="$2";  shift 2;;
+    --check-correctness) CHECK="1";    shift 1;;
+    -h|--help)           sed -n '2,40p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -48,13 +60,16 @@ done
 : "${CEREBRIUM_PROJECT_ID:?set CEREBRIUM_PROJECT_ID}"
 APP="${CEREBRIUM_APP:-cacheblend-eval}"
 REGION="${CEREBRIUM_REGION:-aws.us-east-1}"
-FUNC="${CEREBRIUM_FUNCTION:-run_eval_cerebrium}"
+FUNC="${CEREBRIUM_FUNCTION:-run_cerebrium}"
 
 # Build the JSON body from the flags that were actually provided.
 body="{\"mode\":\"${MODE}\""
-[[ -n "$N" ]]      && body="${body},\"n\":${N}"
-[[ -n "$DEV" ]]    && body="${body},\"deviation_mode\":\"${DEV}\""
-[[ -n "$CONFIG" ]] && body="${body},\"config\":\"${CONFIG}\""
+[[ -n "$N" ]]       && body="${body},\"n\":${N}"
+[[ -n "$DEV" ]]     && body="${body},\"deviation_mode\":\"${DEV}\""
+[[ -n "$CONFIG" ]]  && body="${body},\"config\":\"${CONFIG}\""
+[[ -n "$REPEATS" ]] && body="${body},\"repeats\":${REPEATS}"
+[[ -n "$WARMUP" ]]  && body="${body},\"warmup\":${WARMUP}"
+[[ -n "$CHECK" ]]   && body="${body},\"check_correctness\":true"
 body="${body}}"
 
 base="https://api.${REGION}.cerebrium.ai/v4/${CEREBRIUM_PROJECT_ID}/${APP}/${FUNC}"

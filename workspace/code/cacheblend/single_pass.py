@@ -7,7 +7,7 @@ every other chunk token is served from its precomputed KV cache. The expensive
 per-layer work (q/k/v projections, attention, MLP) therefore scales with
 ``r * chunk_len + suffix_len`` instead of the full sequence, which is where the
 paper's multiple-x TTFT reduction comes from. Because it is one forward, the
-SAME function is scored for accuracy (run_eval) and timed for TTFT (run_ttft),
+SAME function is scored for accuracy and timed for TTFT in ``eval.run_eval``,
 so the accuracy-drop vs TTFT-saving trade-off is read off one implementation.
 
 Layer schedule (matches the official vllm_blend/llama.py status encoding)::
