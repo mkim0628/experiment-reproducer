@@ -8,22 +8,16 @@ to produce the first generated token -- for the same three strategies:
 * ``full_recompute`` -- full prefill over the whole prompt, then 1 token.
 * ``full_reuse``     -- chunk KV loaded from the (pre-warmed) store, only the
   query/suffix is prefilled, then 1 token.
-* ``cacheblend``     -- selective recompute at one ratio, then 1 token.
+* ``cacheblend``     -- the single-pass selective recompute
+  (``cacheblend.single_pass.cacheblend_selective_generate``) at one ratio, then
+  1 token. This is the paper's TTFT path: layers ``0..check_layer`` run a full
+  forward to pick the HKVD tokens, then deeper layers recompute only those
+  HKVD chunk tokens + the suffix, serving every other chunk token from cache.
+  The SAME function scores accuracy in ``run_eval`` and is timed here, so the
+  accuracy/TTFT trade-off is read off one implementation (not two).
 
 It reuses ``run_eval``'s model/dataset/prompt helpers verbatim so the two
 harnesses stay in lock-step.
-
-IMPORTANT caveat about the ``cacheblend`` number
-------------------------------------------------
-This reproduction's ``cacheblend_generate`` is a **two-pass** implementation
-(see ``cacheblend/baselines.py`` docstring): it runs one full forward to
-capture K_new/V_new and a second pass to decode from the blended cache. That
-matches the paper's *quality* exactly but makes its measured TTFT an **upper
-bound**, NOT the paper's single-pass selective-recompute TTFT. So:
-
-* ``full_recompute`` vs ``full_reuse`` TTFT here is a faithful comparison.
-* ``cacheblend`` TTFT here is dominated by the extra capture pass and will
-  often be >= full_recompute. Do not read it as the paper's TTFT speedup.
 
 Chunk KV is **pre-warmed** before timing (``precompute_chunk_kv`` is
 cache-aware, see ``cacheblend/precompute.py:49``), so the timed region excludes
@@ -49,7 +43,6 @@ import torch
 import yaml
 
 from cacheblend.baselines import (
-    cacheblend_generate,
     full_recompute_generate,
     full_reuse_generate,
 )
@@ -109,11 +102,6 @@ def measure_ttft(
     check_layer = cfg["strategy"]["check_layer"]
     deviation_mode = cfg["strategy"].get("deviation_mode", "v")
 
-    print(
-        "[run_ttft] NOTE: cacheblend here is a two-pass impl; its TTFT is an "
-        "upper bound, not the paper's single-pass selective-recompute latency."
-    )
-
     results: List[Dict[str, Any]] = []
     for ds_name, ds_cfg in cfg["datasets"].items():
         import os
@@ -132,7 +120,6 @@ def measure_ttft(
         recompute_ms: List[float] = []
         reuse_ms: List[float] = []
         cb_ms: Dict[float, List[float]] = {r: [] for r in ratios}
-        cb_sel_ms: Dict[float, List[float]] = {r: [] for r in ratios}
 
         for ex in examples:
             full_prompt, chunk_strs = _build_prompts(ds_name, ex)
@@ -154,16 +141,7 @@ def measure_ttft(
                     recompute_ratio=r, check_layer=check_layer,
                     deviation_mode=deviation_mode,
                 )
-                # Two-pass cacheblend: faithful quality, but TTFT is an upper bound.
                 cb_ms[r].append(np.median(_time_call(
-                    lambda bc=blend_cfg: cacheblend_generate(
-                        model, tokenizer, chunk_strs, query="", store=store,
-                        cfg=bc, max_new_tokens=max_new, suffix=suffix_text,
-                    ),
-                    repeats, warmup,
-                )))
-                # True single-pass selective recompute: the paper's TTFT path.
-                cb_sel_ms[r].append(np.median(_time_call(
                     lambda bc=blend_cfg: cacheblend_selective_generate(
                         model, tokenizer, chunk_strs, query="", store=store,
                         cfg=bc, max_new_tokens=max_new, suffix=suffix_text,
@@ -187,25 +165,15 @@ def measure_ttft(
                             "deviation_mode": deviation_mode, "n": len(cb_ms[r]),
                             "speedup_vs_recompute": rec_median / cb_agg["ttft_ms_median"],
                             **cb_agg})
-        for r in ratios:
-            sel_agg = _agg(cb_sel_ms[r])
-            results.append({"dataset": ds_name, "strategy": "cacheblend_selective", "ratio": r,
-                            "deviation_mode": deviation_mode, "n": len(cb_sel_ms[r]),
-                            "speedup_vs_recompute": rec_median / sel_agg["ttft_ms_median"],
-                            **sel_agg})
 
         print(f"  full_recompute median={rec_median:.1f}ms  "
               f"full_reuse median={reuse_agg['ttft_ms_median']:.1f}ms "
-              f"({reuse_agg['ttft_ms_median'] and rec_median / reuse_agg['ttft_ms_median']:.2f}x)")
+              f"({rec_median / reuse_agg['ttft_ms_median']:.2f}x)")
         for r in ratios:
             cb_row = next(x for x in results if x["dataset"] == ds_name
                           and x["strategy"] == "cacheblend" and x["ratio"] == r)
-            sel_row = next(x for x in results if x["dataset"] == ds_name
-                           and x["strategy"] == "cacheblend_selective" and x["ratio"] == r)
-            print(f"  cacheblend(2pass) r={r} median={cb_row['ttft_ms_median']:.1f}ms "
-                  f"({cb_row['speedup_vs_recompute']:.2f}x)  "
-                  f"cacheblend_selective(1pass) median={sel_row['ttft_ms_median']:.1f}ms "
-                  f"({sel_row['speedup_vs_recompute']:.2f}x)")
+            print(f"  cacheblend r={r} median={cb_row['ttft_ms_median']:.1f}ms "
+                  f"({cb_row['speedup_vs_recompute']:.2f}x)")
     return results
 
 
@@ -225,9 +193,9 @@ def run_ttft(config_path: str, repeats: int = 3, warmup: int = 1) -> dict:
     summary = {
         "config": cfg,
         "ttft": {"repeats": repeats, "warmup": warmup, "max_new_tokens": 1,
-                 "note": "strategy 'cacheblend' is the two-pass impl (TTFT is an "
-                         "upper bound, not faithful); 'cacheblend_selective' is the "
-                         "true single-pass selective recompute (the paper's TTFT)"},
+                 "note": "strategy 'cacheblend' is the single-pass selective "
+                         "recompute -- the same implementation scored for accuracy "
+                         "in run_eval, so accuracy and TTFT come from one path"},
         "results": results,
     }
     with open(out_path, "w", encoding="utf-8") as f:

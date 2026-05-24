@@ -242,9 +242,9 @@ def run_ttft_cerebrium(
     * ``repeats`` -- timed iterations per example (median taken).
     * ``warmup``  -- untimed warmup iterations (also pre-warms the chunk store).
 
-    NOTE: this reproduction's ``cacheblend`` is a two-pass implementation, so its
-    TTFT is an upper bound, NOT the paper's single-pass selective-recompute
-    latency. The full_recompute vs full_reuse comparison is faithful.
+    ``cacheblend`` here is the single-pass selective recompute -- the SAME
+    function scored for accuracy in run_eval -- so its TTFT is the paper's
+    selective-recompute latency, comparable to full_recompute / full_reuse.
     """
     _prepare_container(deviation_mode)
     tmp_path = _resolve_config(mode, n, deviation_mode, config,
@@ -280,6 +280,7 @@ def run_combined_cerebrium(
     config: str = "configs/default.yaml",
     repeats: int = 3,
     warmup: int = 1,
+    check_correctness: bool = False,
 ):
     """Measure accuracy AND TTFT in one Cerebrium GPU call, phases isolated.
 
@@ -289,11 +290,15 @@ def run_combined_cerebrium(
     Returns merged per-(dataset,strategy,ratio) rows carrying both ``mean``
     (accuracy) and ``ttft_ms_*`` / ``speedup_vs_recompute``.
 
+    ``cacheblend`` is the single-pass selective recompute: the SAME function is
+    timed (TTFT) and scored (accuracy), so each row's acc/ttft come from one
+    inference path -- the accuracy-drop vs TTFT-saving trade-off the paper
+    reports, read off one implementation.
+
     * ``mode`` / ``n`` / ``deviation_mode`` / ``config`` -- as run_eval_cerebrium.
     * ``repeats`` / ``warmup`` -- TTFT timed / warmup iterations, as run_ttft_cerebrium.
-
-    NOTE: cacheblend's TTFT here is a two-pass upper bound, not the paper's
-    single-pass selective-recompute latency. Accuracy is faithful for all three.
+    * ``check_correctness`` -- first verify single-pass r=1 reproduces a full
+      forward (bit-exact first-token logits) before the measured run.
     """
     _prepare_container(deviation_mode)
     tmp_path = _resolve_config(mode, n, deviation_mode, config,
@@ -301,8 +306,13 @@ def run_combined_cerebrium(
 
     from eval.run_combined import run_combined
 
-    summary = run_combined(tmp_path, repeats=repeats, warmup=warmup)
+    summary = run_combined(tmp_path, repeats=repeats, warmup=warmup,
+                           check_correctness=check_correctness)
 
+    corr = summary.get("correctness")
+    if corr is not None:
+        print(f"\n=== correctness: r1==full_forward={corr['r1_matches_full_forward']} "
+              f"(max|logit diff|={corr['max_logit_diff']:.4g}) ===")
     print("\n=== accuracy + TTFT ===")
     for row in summary.get("results", []):
         ratio = row.get("ratio")
@@ -323,75 +333,7 @@ def run_combined_cerebrium(
         "ttft": summary.get("ttft", {}),
         "phase_order": summary.get("phase_order", []),
         "isolation": summary.get("isolation", ""),
-        "results": summary.get("results", []),
-        "config": summary.get("config", {}),
-        "results_dir": RESULTS_DIR,
-    }
-
-
-def run_singlepass_validate_cerebrium(
-    mode: str = "smoke",
-    n: int = 0,
-    deviation_mode: str = "",
-    config: str = "configs/default.yaml",
-    repeats: int = 3,
-    warmup: int = 1,
-    max_new_tokens: int = 32,
-    compare_twopass: bool = False,
-):
-    """Validate the TRUE single-pass selective recompute and report its TTFT.
-
-    Runs ``eval.validate_singlepass``, which (1) asserts single-pass at r=1.0
-    reproduces full_recompute token-for-token, (2) cross-checks single-pass vs
-    two-pass F1 at the config ratios, and (3) reports single-pass TTFT and its
-    speedup over full_recompute -- the paper-style selective-recompute latency
-    the two-pass path could not measure.
-
-    * ``mode`` / ``n`` / ``deviation_mode`` / ``config`` -- as run_eval_cerebrium.
-    * ``repeats`` / ``warmup`` -- TTFT timed / warmup iterations.
-    * ``max_new_tokens`` -- decode length for the r=1 exact-match + F1 checks.
-    """
-    _prepare_container(deviation_mode)
-    tmp_path = _resolve_config(mode, n, deviation_mode, config,
-                               "/tmp/cerebrium_singlepass_validate_config.yaml")
-
-    import json as _json
-    import time as _time
-
-    import yaml as _yaml
-
-    from eval.run_eval import _load_model, _set_seed
-    from eval.validate_singlepass import validate_singlepass
-
-    cfg = _yaml.safe_load(open(tmp_path, "r", encoding="utf-8"))
-    _set_seed(cfg.get("seed", 42))
-    model, tokenizer, device, dtype = _load_model(cfg)
-    summary = validate_singlepass(model, tokenizer, dtype, cfg,
-                                  repeats=repeats, warmup=warmup,
-                                  max_new_tokens=max_new_tokens,
-                                  compare_twopass=compare_twopass)
-
-    run_id = _time.strftime("%Y%m%d_%H%M%S") + "_singlepass_validate"
-    out_path = os.path.join(RESULTS_DIR, f"{run_id}.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        _json.dump(summary, f, indent=2)
-    print(f"[cerebrium] wrote {out_path}")
-
-    print("\n=== single-pass selective recompute ===")
-    for ds in summary.get("results", []):
-        print(f"  [{ds['dataset']}] r1 first-token match: "
-              f"{ds['r1_first_token_matches_full_forward']}  "
-              f"max|logit diff|={ds['r1_max_logit_diff_max']:.4f}  "
-              f"full_recompute TTFT={ds['ttft_full_recompute_median_ms']:.1f}ms")
-        for r, row in ds.get("cacheblend_selective", {}).items():
-            f2 = row.get("f1_twopass")
-            f2s = f"{f2:.3f}" if isinstance(f2, (int, float)) else "n/a"
-            print(f"    r={r}: TTFT={row['ttft_ms_median']:.1f}ms "
-                  f"({row['speedup_vs_recompute']:.2f}x)  "
-                  f"f1_single={row['f1_singlepass']:.3f} f1_two={f2s}")
-
-    return {
-        "mode": mode,
+        "correctness": summary.get("correctness"),
         "results": summary.get("results", []),
         "config": summary.get("config", {}),
         "results_dir": RESULTS_DIR,

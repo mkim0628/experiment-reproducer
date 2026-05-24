@@ -26,12 +26,14 @@ with the timed first-token region, it would bias TTFT. So this driver enforces:
 The TTFT and accuracy phases reuse ``measure_ttft`` / ``measure_accuracy``
 verbatim, so the combined numbers match the standalone harnesses exactly.
 
-cacheblend TTFT caveat (inherited from run_ttft)
-------------------------------------------------
-This reproduction's ``cacheblend_generate`` is two-pass, so its measured TTFT
-is an upper bound, NOT the paper's single-pass selective-recompute latency. The
-``full_recompute`` vs ``full_reuse`` TTFT comparison is faithful; the accuracy
-numbers are faithful for all three strategies.
+One implementation per strategy
+-------------------------------
+``cacheblend`` is the single-pass selective recompute
+(``cacheblend.single_pass.cacheblend_selective_generate``) in BOTH phases: the
+same function is timed for TTFT and scored for accuracy. So each row's
+``acc`` and ``ttft`` describe the identical inference path -- the accuracy-drop
+vs TTFT-saving trade-off the paper reports is read off one implementation, not
+spliced from two.
 
 Run as::
 
@@ -91,14 +93,53 @@ def _merge(
     return [merged[k] for k in order]
 
 
-def run_combined(config_path: str, repeats: int = 3, warmup: int = 1) -> dict:
+def _check_correctness(model, tokenizer, dtype, cfg: dict) -> Optional[dict]:
+    """Optional sanity gate: single-pass at r=1 must match a full forward.
+
+    Runs on the first example of the first available dataset only (cheap). See
+    ``cacheblend.single_pass.check_r1_matches_full_forward``.
+    """
+    from cacheblend.kv_cache import ChunkKVStore
+    from cacheblend.selective_recompute import BlendConfig
+    from cacheblend.single_pass import check_r1_matches_full_forward
+    from eval.run_eval import _build_prompts, _load_dataset
+
+    blend_cfg = BlendConfig(check_layer=cfg["strategy"]["check_layer"],
+                            deviation_mode=cfg["strategy"].get("deviation_mode", "v"))
+    for ds_name, ds_cfg in cfg["datasets"].items():
+        import os
+        if not os.path.exists(ds_cfg["path"]):
+            continue
+        ex = _load_dataset(ds_name, ds_cfg["path"], 1)[0]
+        full_prompt, chunk_strs = _build_prompts(ds_name, ex)
+        suffix_text = full_prompt[sum(len(c) for c in chunk_strs):]
+        store = ChunkKVStore(model.config.num_hidden_layers, dtype, device="cpu")
+        ok, diff = check_r1_matches_full_forward(
+            model, tokenizer, chunk_strs, store, blend_cfg, suffix=suffix_text)
+        print(f"[run_combined] correctness: r1==full_forward={ok} "
+              f"(max|logit diff|={diff:.4g}) on {ds_name} ex0")
+        return {"dataset": ds_name, "r1_matches_full_forward": ok, "max_logit_diff": diff}
+    return None
+
+
+def run_combined(config_path: str, repeats: int = 3, warmup: int = 1,
+                 check_correctness: bool = False) -> dict:
     cfg = yaml.safe_load(open(config_path, "r", encoding="utf-8"))
     seed = cfg.get("seed", 42)
     _set_seed(seed)
     print(f"[run_combined] seed={seed} config={config_path} "
-          f"repeats={repeats} warmup={warmup}")
+          f"repeats={repeats} warmup={warmup} check_correctness={check_correctness}")
 
     model, tokenizer, device, dtype = _load_model(cfg)
+
+    correctness = None
+    if check_correctness:
+        correctness = _check_correctness(model, tokenizer, dtype, cfg)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+        _set_seed(seed)
 
     # PHASE 1/2 -- TTFT FIRST, on a freshly-loaded (clean) device. Running TTFT
     # before any accuracy work is the guarantee that the accuracy phase cannot
@@ -131,13 +172,15 @@ def run_combined(config_path: str, repeats: int = 3, warmup: int = 1) -> dict:
     summary = {
         "config": cfg,
         "ttft": {"repeats": repeats, "warmup": warmup, "max_new_tokens": 1,
-                 "note": "cacheblend is two-pass; its TTFT is an upper bound, "
-                         "not the paper's single-pass selective-recompute TTFT"},
+                 "note": "cacheblend is the single-pass selective recompute; the "
+                         "same implementation is timed (TTFT) and scored (accuracy), "
+                         "so each row's acc/ttft come from one inference path"},
         "phase_order": ["ttft", "accuracy"],
         "isolation": ("TTFT measured first on a clean device; CUDA cache emptied "
                       "and RNG re-seeded before the accuracy phase; accuracy does "
                       "full-length generation but is never inside a timed region, "
                       "so it cannot affect the TTFT numbers."),
+        "correctness": correctness,
         "results": results,
     }
     with open(out_path, "w", encoding="utf-8") as f:
@@ -167,6 +210,8 @@ def main() -> None:
     p.add_argument("--warmup", type=int, default=1, help="untimed TTFT warmup iterations")
     p.add_argument("--deviation-mode", choices=("v", "k", "kv"), default=None,
                    help="override strategy.deviation_mode from the YAML")
+    p.add_argument("--check-correctness", action="store_true",
+                   help="first verify single-pass r=1 reproduces a full forward")
     args = p.parse_args()
 
     cfg = yaml.safe_load(open(args.config, "r", encoding="utf-8"))
@@ -175,9 +220,11 @@ def main() -> None:
         tmp_path = Path(args.config).with_suffix(".combined_override.yaml")
         with open(tmp_path, "w", encoding="utf-8") as f:
             yaml.safe_dump(cfg, f)
-        run_combined(str(tmp_path), repeats=args.repeats, warmup=args.warmup)
+        run_combined(str(tmp_path), repeats=args.repeats, warmup=args.warmup,
+                     check_correctness=args.check_correctness)
     else:
-        run_combined(args.config, repeats=args.repeats, warmup=args.warmup)
+        run_combined(args.config, repeats=args.repeats, warmup=args.warmup,
+                     check_correctness=args.check_correctness)
 
 
 if __name__ == "__main__":

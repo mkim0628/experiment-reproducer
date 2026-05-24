@@ -1,21 +1,16 @@
-"""True single-pass CacheBlend selective recompute (the paper's TTFT path).
+"""CacheBlend selective recompute -- one forward for both accuracy and TTFT.
 
-``cacheblend.baselines.cacheblend_generate`` is a *two-pass* approximation:
-it runs one FULL forward over every token to capture fresh K/V, then a second
-forward to decode from the blended cache. That reproduces the algorithm's
-*quality* but its TTFT is an upper bound (>= full_recompute), because pass 1
-alone already costs a full prefill.
-
-This module implements the algorithm the way the paper actually runs it -- a
+``cacheblend_selective_generate`` is THE cacheblend strategy in this repo: a
 **single forward** in which, after a small number of "full" layers, only the
 selected HKVD tokens (plus the always-fresh suffix/query) are recomputed and
 every other chunk token is served from its precomputed KV cache. The expensive
 per-layer work (q/k/v projections, attention, MLP) therefore scales with
 ``r * chunk_len + suffix_len`` instead of the full sequence, which is where the
-paper's multiple-x TTFT reduction comes from.
+paper's multiple-x TTFT reduction comes from. Because it is one forward, the
+SAME function is scored for accuracy (run_eval) and timed for TTFT (run_ttft),
+so the accuracy-drop vs TTFT-saving trade-off is read off one implementation.
 
-Layer schedule (matches selective_layer_forward's status encoding and
-vllm_blend/llama.py:350-356)::
+Layer schedule (matches the official vllm_blend/llama.py status encoding)::
 
     li <  check_layer : full forward over all tokens.
     li == check_layer : full forward; compute V/K deviation of fresh vs cached
@@ -24,25 +19,20 @@ vllm_blend/llama.py:350-356)::
                         attention queries = those active tokens, keys/values =
                         blended (fresh at active positions, cached elsewhere).
 
-Correctness anchor (validated on GPU, not assertable on a CPU-only box):
+Correctness anchor (``check_r1_matches_full_forward``, run on GPU):
 
 * ``r == 1.0``: every chunk token is HKVD -> ``active`` is the whole sequence at
-  every layer -> the run is a plain full forward -> output is identical to
-  ``full_recompute_generate``. This is the primary correctness test.
+  every layer -> the run is a plain full forward -> first-token logits are
+  bit-identical to ``model(full_ids)``. This is the primary correctness test.
 
 Note this does NOT reduce to ``full_reuse_generate`` at ``r == 0``: layers
 ``0..check_layer`` are always a full forward over all tokens (their fresh chunk
 K/V is what the deviation at the check layer is measured against), so r=0 still
 recomputes the first ``check_layer+1`` layers for chunk tokens rather than
 serving them entirely from cache. That cost is exactly why selective recompute's
-TTFT sits above pure reuse but well below full recompute.
-
-The HKVD set is selected from the same fresh-vs-cached deviation at the check
-layer as the two-pass ``cacheblend_generate``, so both pick the *same* indices.
-They differ in how hidden states propagate afterwards: this single pass serves
-non-HKVD chunk tokens from cache while recomputing HKVD tokens (the paper's
-behaviour), whereas the two-pass gives HKVD tokens fully-fresh context. So the
-two are close in quality but bit-identical only at r == 1.
+TTFT sits above pure reuse but well below full recompute. When recomputing an
+HKVD token, non-HKVD chunk tokens are served from cache (the paper's behaviour),
+not given fresh context.
 
 NOTE: assumes full (non-sliding-window) causal attention. Mistral-7B-Instruct
 -v0.2 sets ``sliding_window=null`` so this holds; a model with an active
@@ -271,11 +261,12 @@ def cacheblend_selective_generate(
     prefix: str = "",
     suffix: str = "",
 ) -> str:
-    """Single-pass selective-recompute generation (drop-in for cacheblend_generate).
+    """Single-pass selective-recompute generation -- the cacheblend strategy.
 
-    Same inputs/outputs as :func:`cacheblend.baselines.cacheblend_generate`, but
-    runs ONE forward (the paper's selective recompute) instead of two, so its
-    first-token latency reflects the algorithm's real TTFT.
+    Same signature as the ``full_reuse_generate`` family (chunks + suffix/query,
+    a shared chunk-KV store, a BlendConfig). Runs ONE forward, so its first-token
+    latency is the algorithm's real TTFT and the same call also produces the text
+    that run_eval scores for accuracy.
     """
     if prefix:
         raise NotImplementedError("cacheblend_selective_generate: prefix unsupported")
@@ -317,3 +308,33 @@ def cacheblend_selective_generate(
         cur_pos += 1
 
     return tokenizer.decode(generated, skip_special_tokens=True)
+
+
+@torch.no_grad()
+def check_r1_matches_full_forward(
+    model, tokenizer, chunks: List[str], store: ChunkKVStore, cfg: BlendConfig,
+    suffix: str = "", query: str = "",
+) -> Tuple[bool, float]:
+    """Correctness anchor: at r=1 the selective forward must reduce to a full one.
+
+    With recompute_ratio=1.0 every chunk token is HKVD, so ``active`` is the
+    whole sequence at every layer and ``_selective_prefill`` becomes a plain full
+    forward. We compare its final-position logits against an ordinary
+    ``model(full_ids)`` over the identical ids. Returns
+    ``(first_token_argmax_matches, max_abs_logit_diff)``; a correct forward gives
+    ``(True, ~0.0)``. Independent of tokenization / long-decode drift since it
+    only looks at the first-token logits on the same ids.
+    """
+    cfg_r1 = BlendConfig(recompute_ratio=1.0, check_layer=cfg.check_layer,
+                         deviation_mode=cfg.deviation_mode)
+    fused_cache, full_ids, total_chunk_len = prepare_selective_inputs(
+        model, tokenizer, chunks, store, suffix=suffix, query=query)
+    try:
+        ref = model(full_ids, use_cache=False, logits_to_keep=1).logits[:, -1, :].float()
+    except TypeError:  # older HF without logits_to_keep
+        ref = model(full_ids, use_cache=False).logits[:, -1, :].float()
+    _, sp, _ = _selective_prefill(
+        model, fused_cache, full_ids, total_chunk_len, cfg_r1, build_cache=False)
+    sp = sp.float()
+    matches = bool(torch.argmax(ref, dim=-1).item() == torch.argmax(sp, dim=-1).item())
+    return matches, float((sp - ref).abs().max().item())

@@ -74,12 +74,12 @@ def main() -> None:
 
     # --- Late imports (avoid touching transformers if smoke is skipping). ---
     from cacheblend.baselines import (
-        cacheblend_generate,
         full_recompute_generate,
         full_reuse_generate,
     )
     from cacheblend.kv_cache import ChunkKVStore
     from cacheblend.selective_recompute import BlendConfig
+    from cacheblend.single_pass import cacheblend_selective_generate
     from eval.datasets import build_qa_prompt, load_wikimqa
     from eval.metrics import compute_f1_max
     import torch
@@ -96,8 +96,8 @@ def main() -> None:
         pred_full = full_recompute_generate(model, tok, full_prompt, max_new_tokens=32)
         pred_reuse = full_reuse_generate(model, tok, chunk_strs, query="", store=store,
                                          max_new_tokens=32, suffix=suffix_text)
-        pred_cb = cacheblend_generate(model, tok, chunk_strs, query="", store=store,
-                                      cfg=blend_cfg, max_new_tokens=32, suffix=suffix_text)
+        pred_cb = cacheblend_selective_generate(model, tok, chunk_strs, query="", store=store,
+                                                cfg=blend_cfg, max_new_tokens=32, suffix=suffix_text)
         f1_full.append(compute_f1_max(pred_full, ex.answers, tok))
         f1_reuse.append(compute_f1_max(pred_reuse, ex.answers, tok))
         f1_cb.append(compute_f1_max(pred_cb, ex.answers, tok))

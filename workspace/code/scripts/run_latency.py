@@ -3,12 +3,12 @@ cacheblend(r) on each dataset listed in a config YAML.
 
 Why this is its own script (not part of ``run_eval``):
 
-* ``cacheblend_generate`` in ``cacheblend/baselines.py`` is the *quality*
-  implementation, which runs the model twice (see ``CODER_NOTES.md`` item 2).
-  Two-pass is correct for F1 but inflates TTFT and would hide the algorithm's
-  real latency advantage.
-* This script uses a *latency-model approximation* that mirrors the paper's
-  algorithmic cost (single forward, selective recompute):
+* This is the Modal-path *latency-model approximation* (driven by
+  ``run_latency_modal.py``). The Cerebrium eval path
+  (``eval/run_ttft.py`` / ``eval/run_combined.py``) instead times the real
+  single-pass ``cacheblend.single_pass.cacheblend_selective_generate``.
+* The approximation mirrors the paper's algorithmic cost (single forward,
+  selective recompute):
 
     full_recompute(prompt)        = forward( full_prompt_ids )
     full_reuse(chunks, suffix)    = forward( suffix_ids,                  past_key_values = fused_chunk_cache )

@@ -22,12 +22,12 @@ import torch
 import yaml
 
 from cacheblend.baselines import (
-    cacheblend_generate,
     full_recompute_generate,
     full_reuse_generate,
 )
 from cacheblend.kv_cache import ChunkKVStore
 from cacheblend.selective_recompute import BlendConfig
+from cacheblend.single_pass import cacheblend_selective_generate
 from eval.datasets import (
     Example,
     build_claim_verification_prompt,
@@ -186,7 +186,7 @@ def measure_accuracy(model, tokenizer, dtype, cfg: Dict[str, Any]) -> List[Dict[
                 _, chunk_strs = _build_prompts(ds_name, ex)
                 full_prompt, _ = _build_prompts(ds_name, ex)
                 suffix_text = full_prompt[sum(len(c) for c in chunk_strs):]
-                pred = cacheblend_generate(
+                pred = cacheblend_selective_generate(
                     model, tokenizer, chunk_strs, query="", store=store,
                     cfg=blend_cfg, max_new_tokens=ds_max_new, suffix=suffix_text,
                 )

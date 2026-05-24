@@ -9,9 +9,10 @@
 # wrappers, the webhook completion callback is enabled BY DEFAULT whenever
 # CEREBRIUM_WEBHOOK_URL is set.
 #
-# NOTE: cacheblend's measured TTFT is a two-pass upper bound, NOT the paper's
-# single-pass selective-recompute latency. The full_recompute vs full_reuse
-# TTFT comparison is faithful; accuracy is faithful for all three strategies.
+# NOTE: cacheblend is the single-pass selective recompute -- the SAME function
+# is timed (TTFT) and scored (accuracy), so each row's acc/ttft come from one
+# inference path (the paper's accuracy-vs-TTFT trade-off, one implementation).
+# Pass --check-correctness to first verify r=1 reproduces a full forward.
 # See eval/run_combined.py.
 #
 # Usage:
@@ -41,15 +42,17 @@ DEV=""
 CONFIG=""
 REPEATS=""
 WARMUP=""
+CHECK=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --mode)            MODE="$2";    shift 2;;
-    --n)               N="$2";       shift 2;;
-    --deviation-mode)  DEV="$2";     shift 2;;
-    --config)          CONFIG="$2";  shift 2;;
-    --repeats)         REPEATS="$2"; shift 2;;
-    --warmup)          WARMUP="$2";  shift 2;;
-    -h|--help)         sed -n '2,40p' "$0"; exit 0;;
+    --mode)              MODE="$2";    shift 2;;
+    --n)                 N="$2";       shift 2;;
+    --deviation-mode)    DEV="$2";     shift 2;;
+    --config)            CONFIG="$2";  shift 2;;
+    --repeats)           REPEATS="$2"; shift 2;;
+    --warmup)            WARMUP="$2";  shift 2;;
+    --check-correctness) CHECK="1";    shift 1;;
+    -h|--help)           sed -n '2,40p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -67,6 +70,7 @@ body="{\"mode\":\"${MODE}\""
 [[ -n "$CONFIG" ]]  && body="${body},\"config\":\"${CONFIG}\""
 [[ -n "$REPEATS" ]] && body="${body},\"repeats\":${REPEATS}"
 [[ -n "$WARMUP" ]]  && body="${body},\"warmup\":${WARMUP}"
+[[ -n "$CHECK" ]]   && body="${body},\"check_correctness\":true"
 body="${body}}"
 
 base="https://api.${REGION}.cerebrium.ai/v4/${CEREBRIUM_PROJECT_ID}/${APP}/${FUNC}"

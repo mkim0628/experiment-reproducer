@@ -7,10 +7,10 @@
 # the eval wrapper, the webhook completion callback is enabled BY DEFAULT
 # whenever CEREBRIUM_WEBHOOK_URL is set.
 #
-# NOTE: this reproduction's cacheblend path is a two-pass implementation, so its
-# measured TTFT is an upper bound, NOT the paper's single-pass
-# selective-recompute latency. The full_recompute vs full_reuse comparison is
-# faithful. See eval/run_ttft.py.
+# NOTE: cacheblend here is the single-pass selective recompute -- the same
+# implementation scored for accuracy in run_eval -- so its TTFT is the paper's
+# selective-recompute latency, comparable to full_recompute / full_reuse.
+# See eval/run_ttft.py.
 #
 # Usage:
 #   ./run_ttft_cerebrium.sh                              # mode=smoke (async)

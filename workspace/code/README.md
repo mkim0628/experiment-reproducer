@@ -131,7 +131,8 @@ workspace/code/
     blend.py               # PositionalEncodingRecovery: re-applies rotary_emb to stored pre-RoPE K
     selective_recompute.py # compute_v_deviation, select_hkvd_indices, BlendConfig, layer wrapper
     precompute.py          # captures pre-RoPE K (via k_proj forward hook) and V per layer
-    baselines.py           # full_recompute_generate / full_reuse_generate / cacheblend_generate
+    baselines.py           # full_recompute_generate / full_reuse_generate + fused-cache builder
+    single_pass.py         # cacheblend_selective_generate: the single-pass selective recompute
   eval/
     datasets.py            # bundled-JSON loaders (wikimqa_s, musique_s, samsum) + official prompts
     metrics.py             # SQuAD-style token F1 + rouge_score Rouge-L (use_stemmer=True)
@@ -160,7 +161,7 @@ workspace/code/
 - **`cacheblend.blend.recover_rope_k(k_pre, new_positions, rotary_emb)`** — calls `rotary_emb(positions=new_positions, q=fake_q, k=k_pre)` and returns the rotated K. Tested against a direct HF Mistral forward at the new positions to max abs diff < 1e-4 in fp32.
 - **`cacheblend.selective_recompute.compute_v_deviation(v_new, v_pre)`** — `torch.sum((v_new - v_pre) ** 2, dim=[1, 2])`; matches `vllm_blend/vllm/attention/backends/xformers.py:210` exactly.
 - **`cacheblend.selective_recompute.select_hkvd_indices(deviation, r)`** — `torch.topk(deviation, k=ceil(r * N)).indices.sort().values`; ascending sort is for deterministic test layout, not algorithmic correctness.
-- **`cacheblend.baselines.cacheblend_generate`** — see CODER_NOTES item 2 (runs the model twice; bit-equivalent to a single-pass implementation).
+- **`cacheblend.single_pass.cacheblend_selective_generate`** — the single-pass selective recompute: one forward that recomputes only the HKVD chunk tokens + suffix and serves the rest from cache. Scored for accuracy AND timed for TTFT, so both come from one implementation. `check_r1_matches_full_forward` verifies the `r=1` reduction to a full forward (bit-exact first-token logits).
 
 ## How tests work (algorithmic gates)
 
@@ -230,23 +231,29 @@ Adjust the helper for whichever signature your target model uses; the test in
 `test_rope_recovery.py` will catch a mistake here because it compares against a
 direct forward.
 
-### 3. Layer wrapper / blend forward (`selective_recompute.py` and `baselines.py`)
+### 3. Selective-recompute forward (`cacheblend/single_pass.py`)
 
-`cacheblend_generate` currently uses a two-pass approach (see
-[`CODER_NOTES.md`](CODER_NOTES.md) item 2): pass 1 captures `K_new`/`V_new` for
-the full sequence; pass 2 builds a blended `past_key_values` and decodes. The
-blended cache is constructed per-layer as:
+`cacheblend_selective_generate` is a **single forward**: layers `0..check_layer`
+run over all tokens (to measure the fresh-vs-cached deviation and pick the
+top-`r%` HKVD chunk indices), then deeper layers recompute q/k/v ONLY for those
+HKVD chunk tokens + the suffix, serving every other chunk token from its
+precomputed cache. The check-layer selection is:
 
 ```
-# at the check layer (idx=1):
-deviation = compute_v_deviation(V_new, V_pre)        # (N,)
-imp = select_hkvd_indices(deviation, r)              # ceil(rN) indices
-K_blend = K_pre_rotated.clone(); V_blend = V_pre.clone()
-K_blend[..., imp, :] = K_new[..., imp, :]            # in-place
-V_blend[..., imp, :] = V_new[..., imp, :]
+# at the check layer:
+deviation = compute_kv_deviation(K_new, K_pre, V_new, V_pre, mode)  # (N,)
+hkvd = select_hkvd_indices(deviation, r)             # ceil(rN) indices
 
-# at every other layer: same `imp` indices, no recomputation of deviation
+# deeper layers: active = hkvd (chunk) + suffix; attention queries are those
+# active tokens; keys/values are blended (fresh at active positions, the
+# precomputed cache elsewhere). No second pass, no per-layer re-selection.
 ```
+
+Because it is one forward, the SAME call is scored for accuracy (`run_eval`)
+and timed for TTFT (`run_ttft`) -- the paper's accuracy-vs-TTFT trade-off is
+read off one implementation. Correctness anchor: at `r=1` every token is HKVD,
+so the forward reduces to a plain full forward; `check_r1_matches_full_forward`
+asserts its first-token logits are bit-identical to `model(full_ids)`.
 
 To extend to a different model:
 
