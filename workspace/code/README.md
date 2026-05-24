@@ -1,8 +1,10 @@
-# CacheBlend quality-only reproduction — developer README
+# CacheBlend reproduction — developer README
 
 A from-scratch HuggingFace `transformers` re-implementation of the CacheBlend
 selective-KV-recompute algorithm on `mistralai/Mistral-7B-Instruct-v0.2` (fp16).
-Quality only: F1 / Rouge-L. TTFT / throughput are out of scope.
+Measures BOTH quality (F1 / Rouge-L) and TTFT (time-to-first-token) from the
+**same** single-pass implementation, so the accuracy-drop vs TTFT-saving
+trade-off is read off one code path.
 
 The top-level [`/README.md`](../../README.md) is the user-facing entry point and
 records the reproduction verdict. This document is for developers extending the
@@ -21,7 +23,7 @@ There are three ways to run the grid, all driven from this directory
 
 All three need a HuggingFace token with access to the gated
 `mistralai/Mistral-7B-Instruct-v0.2` repo. `smoke` = wikimqa, n=3, ratio 0.15
-(pipeline sanity check, ~$0.03 on cloud L4); `full` = the YAML grid. Per
+(pipeline sanity check, ~$0.05 on cloud L4); `full` = the YAML grid. Per
 [`CLAUDE.md`](../../CLAUDE.md), **always smoke before a full sweep**.
 
 ### A. Modal (`run_eval_modal.py`)
@@ -146,6 +148,9 @@ workspace/code/
     run_eval.py            # the single eval driver: accuracy + TTFT per (dataset x strategy x ratio)
   scripts/
     run_smoke.py           # 3-example 2WikiMQA smoke run; SKIPs gracefully when no GPU
+    run_cerebrium.sh       # the single Cerebrium wrapper -> run_cerebrium (accuracy + TTFT)
+    run_latency.py         # Modal-path latency-model approximation (driven by run_latency_modal.py)
+    download_extra_datasets.py / build_*.py / audit_datasets.py  # dataset fetch/build/audit
   configs/
     default.yaml           # single source of truth: model, dtype, dataset sizes, r-grid, output dir
   tests/
@@ -155,6 +160,7 @@ workspace/code/
     test_selective_recompute.py
     test_metrics.py
     test_datasets.py
+    test_audit.py
   data/
     wikimqa_s.json         # bundled verbatim from official CacheBlend repo
     musique_s.json
@@ -165,14 +171,14 @@ workspace/code/
 ### Component contracts
 
 - **`cacheblend.kv_cache.ChunkKVStore`** — keyed by SHA-256 over CBOR(`(parent_hash, token_id_block)`); falls back to JSON serialization if `cbor2` is unavailable. The fallback is deterministic across processes but not byte-equal to vLLM's canonical hash. Stores per-layer K (pre-RoPE) and V on CPU; no eviction.
-- **`cacheblend.blend.recover_rope_k(k_pre, new_positions, rotary_emb)`** — calls `rotary_emb(positions=new_positions, q=fake_q, k=k_pre)` and returns the rotated K. Tested against a direct HF Mistral forward at the new positions to max abs diff < 1e-4 in fp32.
-- **`cacheblend.selective_recompute.compute_v_deviation(v_new, v_pre)`** — `torch.sum((v_new - v_pre) ** 2, dim=[1, 2])`; matches `vllm_blend/vllm/attention/backends/xformers.py:210` exactly.
+- **`cacheblend.blend.recover_rope_k(k_pre, new_positions, rotary_emb)`** — calls `rotary_emb(k_pre, new_positions)` to get `(cos, sin)`, then applies the rotation to `k_pre` and returns the rotated K. Tested against a direct HF Mistral forward at the new positions to max abs diff < 1e-4 in fp32.
+- **`cacheblend.selective_recompute.compute_v_deviation(v_new, v_pre)`** — per-token squared L2 (`torch.sum((v_new - v_pre) ** 2, dim=[1, 2])`); matches `vllm_blend/vllm/attention/backends/xformers.py:210`. `compute_k_deviation` / `compute_kv_deviation` add the K and K+V variants; `BlendConfig.deviation_mode` (`v` / `k` / `kv`) selects which — the YAML default is `k`, switch to `v` to match the paper's measured numbers.
 - **`cacheblend.selective_recompute.select_hkvd_indices(deviation, r)`** — `torch.topk(deviation, k=ceil(r * N)).indices.sort().values`; ascending sort is for deterministic test layout, not algorithmic correctness.
 - **`cacheblend.single_pass.cacheblend_selective_generate`** — the single-pass selective recompute: one forward that recomputes only the HKVD chunk tokens + suffix and serves the rest from cache. Scored for accuracy AND timed for TTFT, so both come from one implementation. `check_r1_matches_full_forward` verifies the `r=1` reduction to a full forward (bit-exact first-token logits).
 
 ## How tests work (algorithmic gates)
 
-Run `pytest workspace/code/tests/ -q` (currently 25 tests, ~4 s wall, no GPU needed).
+Run `pytest workspace/code/tests/ -q` (currently 49 tests across 7 files, no GPU needed).
 
 Each module ships with a dedicated test file that locks in one algorithmic
 property. These are the same "gates" the validator checks in
@@ -186,6 +192,7 @@ property. These are the same "gates" the validator checks in
 | `test_selective_recompute.py` | selective merge bounds | r=1.0 selects all (full recompute); r=0.0 selects none (no-op); in-place index_copy preserves unselected |
 | `test_metrics.py` | scoring | `normalize_answer` strips articles+punct; F1 on canned pairs; Rouge-L on canned pairs |
 | `test_datasets.py` | data ingestion | loaders parse the bundled JSON; QA and SAMSum prompts assemble to the exact official strings |
+| `test_audit.py` | dataset audit | `scripts/audit_datasets.py` per-dataset auditors flag degenerate sets (e.g. all-SUPPORTED HoVer) on synthetic fixtures |
 
 If a test fails, the corresponding row in [`workspace/validation/report.json`](../validation/report.json) is the source of truth — update there too.
 
@@ -278,8 +285,13 @@ plumbing mistakes before you launch the full eval grid.
 
 ## Frozen decisions
 
+(the `configs/default.yaml` grid — override per run with `--n` / `--ratios` /
+`--deviation-mode`)
+
 - Recompute-ratio grid: `r ∈ {0.05, 0.10, 0.15, 0.18}`.
-- 100 examples per dataset.
+- 200 examples per dataset (MultiNews 60, the paper's eval-set size).
+- HKVD deviation tensor: `deviation_mode: k` is the YAML default (an ablation);
+  switch to `v` to match the official vllm_blend release / the paper's numbers.
 - Single check layer at decoder index 1.
 - Native chunking from the bundled JSON (no Langchain re-chunk in this run).
 - Greedy decoding (`do_sample=False`), matching `blend_wikimqa.py` /
