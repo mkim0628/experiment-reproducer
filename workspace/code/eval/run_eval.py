@@ -217,7 +217,6 @@ def measure_accuracy(model, tokenizer, dtype, cfg: Dict[str, Any]) -> List[Dict[
         print(f"[eval] accuracy: dataset={ds_name} n={len(examples)} "
               f"metric={metric} max_new_tokens={ds_max_new} selection={selection_modes}")
 
-        store = ChunkKVStore(n_layers, dtype, device="cpu")
         scores_full, scores_reuse = [], []
         scores_cb: Dict[Tuple[str, float], List[float]] = {
             (sel, r): [] for sel in selection_modes for r in ratios}
@@ -225,6 +224,12 @@ def measure_accuracy(model, tokenizer, dtype, cfg: Dict[str, Any]) -> List[Dict[
         for i, ex in enumerate(examples):
             full_prompt, chunk_strs = _build_prompts(ds_name, ex)
             suffix_text = _suffix_of(full_prompt, chunk_strs)
+            # Fresh store PER EXAMPLE: examples have distinct contexts (no
+            # cross-example chunk reuse), so a dataset-scoped store would just
+            # accumulate every example's chunk KV on CPU RAM and OOM-kill the
+            # process at large n. Within an example the store is still shared by
+            # full_reuse + all cacheblend cells (precompute is cache-aware).
+            store = ChunkKVStore(n_layers, dtype, device="cpu")
 
             # Compute every strategy's score into temps first; only commit if the
             # whole example succeeds, so a mid-example failure (e.g. an OOM on a
@@ -312,7 +317,6 @@ def measure_ttft(
         print(f"[eval] ttft: dataset={ds_name} n={len(examples)} selection={selection_modes}")
 
         max_new = 1  # TTFT = latency to the first token
-        store = ChunkKVStore(n_layers, dtype, device="cpu")
         recompute_ms, reuse_ms = [], []
         cb_ms: Dict[Tuple[str, float], List[float]] = {
             (sel, r): [] for sel in selection_modes for r in ratios}
@@ -321,6 +325,9 @@ def measure_ttft(
         for i, ex in enumerate(examples):
             full_prompt, chunk_strs = _build_prompts(ds_name, ex)
             suffix_text = _suffix_of(full_prompt, chunk_strs)
+            # Fresh store per example (see measure_accuracy): bounds CPU RAM to a
+            # single example's chunk KV instead of accumulating all n examples'.
+            store = ChunkKVStore(n_layers, dtype, device="cpu")
 
             # As in measure_accuracy: time every strategy into temps and commit
             # atomically, so a single failing example is skipped (not fatal) and
