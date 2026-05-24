@@ -13,14 +13,17 @@ plan. Append-only.
    `(batch, num_kv_heads, seq_len, head_dim)`). V is taken straight from the
    layer cache because RoPE does not touch V.
 
-2. **Two-pass CacheBlend forward.** The official vllm_blend fork patches
+2. **Single-pass CacheBlend forward.** The official vllm_blend fork patches
    `xformers.memory_efficient_attention` to swap K/V at the check layer
-   mid-forward. Modern HF does not expose that hook cleanly; we instead run
-   the model TWICE for `cacheblend_generate`: pass 1 captures `K_new` and
-   `V_new` for the full (chunks + query) sequence via projection hooks, pass
-   2 decodes from a pre-built blended cache. Quality is unchanged (we
-   reproduce the exact algorithmic state) at a TTFT cost that is irrelevant
-   for the quality-only reproduction.
+   mid-forward. Modern HF does not expose that hook cleanly, so
+   `cacheblend.single_pass.cacheblend_selective_generate` hand-writes the
+   decoder forward (GQA + RoPE + blended KV + causal attention over the
+   scattered active queries): layers `0..check_layer` run full to pick the
+   HKVD tokens, then deeper layers recompute q/k/v only for those HKVD chunk
+   tokens + the suffix and serve every other chunk token from cache. One
+   forward, so the same call gives both accuracy and the paper's TTFT.
+   `check_r1_matches_full_forward` asserts the `r=1` reduction to a full
+   forward is bit-exact (first-token logits, max|diff|=0).
 
 3. **Top-k via `torch.topk` then sort ascending.** `index_copy_` does not
    require sorted indices, but ascending order keeps the resulting K/V slice
@@ -50,10 +53,10 @@ to TTFT / Throughput / storage cost choices that are out of scope here.)
 
 ## Open TODOs (none blocking quality reproduction)
 
-* `selective_layer_forward` is exposed as a stub with `NotImplementedError`
-  for the status-1/2 paths; the full algorithmic forward is implemented end
-  to end in `cacheblend.baselines.cacheblend_generate` instead. The plan's
-  `public_api` listing for that function is preserved for traceability.
+* The full selective-recompute forward is implemented end to end in
+  `cacheblend.single_pass.cacheblend_selective_generate` (single pass; serves
+  accuracy and TTFT from one path). The earlier `selective_layer_forward`
+  stub has been removed.
 
 ## Spec deviations
 
