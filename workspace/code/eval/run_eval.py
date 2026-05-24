@@ -160,6 +160,35 @@ def _agg(per_example_ms: List[float]) -> Dict[str, float]:
     }
 
 
+def _environment_info(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Capture the hardware / software stack the run executed on."""
+    import platform
+    import sys as _sys
+
+    import transformers
+
+    info: Dict[str, Any] = {
+        "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "python": _sys.version.split()[0],
+        "platform": platform.platform(),
+        "torch": torch.__version__,
+        "transformers": transformers.__version__,
+        "cuda": torch.version.cuda,
+        "cudnn": (torch.backends.cudnn.version()
+                  if torch.backends.cudnn.is_available() else None),
+        "gpu": None,
+        "gpu_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+        "gpu_memory_total_gb": None,
+        "model": cfg.get("model", {}).get("name"),
+        "dtype": cfg.get("model", {}).get("dtype"),
+    }
+    if torch.cuda.is_available():
+        info["gpu"] = torch.cuda.get_device_name(0)
+        props = torch.cuda.get_device_properties(0)
+        info["gpu_memory_total_gb"] = round(props.total_memory / 1e9, 2)
+    return info
+
+
 # ----------------------------------------------------------------- accuracy
 def measure_accuracy(model, tokenizer, dtype, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Accuracy phase: full-length generation + metric per (dataset, strategy, ratio).
@@ -388,6 +417,7 @@ def run_combined(config_path: str, repeats: int = 3, warmup: int = 1,
     results = _merge(ttft_rows, acc_rows)
     summary = {
         "config": cfg,
+        "environment": _environment_info(cfg),
         "ttft": {"repeats": repeats, "warmup": warmup, "max_new_tokens": 1,
                  "note": "cacheblend is the single-pass selective recompute; the "
                          "same implementation is timed (TTFT) and scored (accuracy), "
@@ -420,6 +450,37 @@ def run_combined(config_path: str, repeats: int = 3, warmup: int = 1,
     return summary
 
 
+def run_ttft_only(config_path: str, repeats: int = 3, warmup: int = 1) -> dict:
+    """TTFT-only driver: time first-token latency, skip accuracy. Captures env."""
+    cfg = yaml.safe_load(open(config_path, "r", encoding="utf-8"))
+    seed = cfg.get("seed", 42)
+    _set_seed(seed)
+    print(f"[eval] TTFT-only seed={seed} config={config_path} "
+          f"repeats={repeats} warmup={warmup} "
+          f"ratios={cfg['strategy']['recompute_ratios']}")
+
+    model, tokenizer, device, dtype = _load_model(cfg)
+    results = measure_ttft(model, tokenizer, dtype, cfg, repeats=repeats, warmup=warmup)
+    summary = {
+        "config": cfg,
+        "environment": _environment_info(cfg),
+        "ttft": {"repeats": repeats, "warmup": warmup, "max_new_tokens": 1,
+                 "note": "cacheblend is the single-pass selective recompute (the "
+                         "same implementation scored for accuracy in run_combined)"},
+        "results": results,
+    }
+    _write(cfg, summary, "_ttft")
+
+    print("\n=== TTFT (ms) ===")
+    for row in results:
+        ratio = row.get("ratio")
+        ratio_s = f"r={ratio:.2f}" if isinstance(ratio, (int, float)) else "-"
+        print(f"  {row['dataset']:<14} {row['strategy']:<16} {ratio_s:<8} "
+              f"median={row['ttft_ms_median']:.1f}ms p90={row['ttft_ms_p90']:.1f}ms "
+              f"speedup={row['speedup_vs_recompute']:.2f}x n={row['n']}")
+    return summary
+
+
 def run_eval(config_path: str) -> dict:
     """Accuracy-only driver (kept for the Modal app ``run_eval_modal.py``)."""
     cfg = yaml.safe_load(open(config_path, "r", encoding="utf-8"))
@@ -427,7 +488,7 @@ def run_eval(config_path: str) -> dict:
     print(f"[eval] accuracy-only seed={cfg.get('seed', 42)} config={config_path}")
     model, tokenizer, device, dtype = _load_model(cfg)
     results = measure_accuracy(model, tokenizer, dtype, cfg)
-    summary = {"config": cfg, "results": results}
+    summary = {"config": cfg, "environment": _environment_info(cfg), "results": results}
     _write(cfg, summary, "")
     return summary
 

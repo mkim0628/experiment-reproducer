@@ -18,6 +18,7 @@
 #   ./run_cerebrium.sh --mode full --n 50
 #   ./run_cerebrium.sh --mode smoke --repeats 5 --warmup 2
 #   ./run_cerebrium.sh --mode smoke --check-correctness
+#   ./run_cerebrium.sh --mode full --n 10 --ratios 0.1,0.15,0.2,0.4,0.6,0.8 --ttft-only
 #   SYNC=1 ./run_cerebrium.sh                       # wait for the JSON response inline
 #   DRY_RUN=1 ./run_cerebrium.sh --mode full        # print the request, don't send it
 #
@@ -42,6 +43,8 @@ CONFIG=""
 REPEATS=""
 WARMUP=""
 CHECK=""
+RATIOS=""
+TTFT_ONLY=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode)              MODE="$2";    shift 2;;
@@ -51,6 +54,8 @@ while [[ $# -gt 0 ]]; do
     --repeats)           REPEATS="$2"; shift 2;;
     --warmup)            WARMUP="$2";  shift 2;;
     --check-correctness) CHECK="1";    shift 1;;
+    --ratios)            RATIOS="$2";  shift 2;;
+    --ttft-only)         TTFT_ONLY="1"; shift 1;;
     -h|--help)           sed -n '2,40p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -67,9 +72,11 @@ body="{\"mode\":\"${MODE}\""
 [[ -n "$N" ]]       && body="${body},\"n\":${N}"
 [[ -n "$DEV" ]]     && body="${body},\"deviation_mode\":\"${DEV}\""
 [[ -n "$CONFIG" ]]  && body="${body},\"config\":\"${CONFIG}\""
-[[ -n "$REPEATS" ]] && body="${body},\"repeats\":${REPEATS}"
-[[ -n "$WARMUP" ]]  && body="${body},\"warmup\":${WARMUP}"
-[[ -n "$CHECK" ]]   && body="${body},\"check_correctness\":true"
+[[ -n "$REPEATS" ]]   && body="${body},\"repeats\":${REPEATS}"
+[[ -n "$WARMUP" ]]    && body="${body},\"warmup\":${WARMUP}"
+[[ -n "$CHECK" ]]     && body="${body},\"check_correctness\":true"
+[[ -n "$RATIOS" ]]    && body="${body},\"ratios\":\"${RATIOS}\""
+[[ -n "$TTFT_ONLY" ]] && body="${body},\"ttft_only\":true"
 body="${body}}"
 
 base="https://api.${REGION}.cerebrium.ai/v4/${CEREBRIUM_PROJECT_ID}/${APP}/${FUNC}"

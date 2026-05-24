@@ -82,11 +82,13 @@ def _deep_merge(base: dict, patch: dict) -> None:
             base[k] = v
 
 
-def _build_config_text(mode: str, n: int, deviation_mode: str, config: str) -> str:
+def _build_config_text(mode: str, n: int, deviation_mode: str, config: str,
+                       ratios: str = "") -> str:
     """Read configs/default.yaml and apply the smoke/full overrides.
 
     Returns the resolved YAML *text* (mirrors run_eval_modal.main's logic so the
-    two backends stay in lock-step).
+    two backends stay in lock-step). ``ratios`` (comma-separated, e.g.
+    "0.1,0.15,0.2") overrides strategy.recompute_ratios for either mode.
     """
     import yaml
 
@@ -113,6 +115,11 @@ def _build_config_text(mode: str, n: int, deviation_mode: str, config: str) -> s
             cfg.setdefault("strategy", {})["deviation_mode"] = deviation_mode
     else:
         raise ValueError(f"unknown mode {mode!r} (use 'smoke' or 'full')")
+
+    if ratios:
+        parsed = [float(x) for x in str(ratios).split(",") if x.strip() != ""]
+        if parsed:
+            cfg.setdefault("strategy", {})["recompute_ratios"] = parsed
 
     return yaml.safe_dump(cfg)
 
@@ -158,17 +165,19 @@ def _prepare_container(deviation_mode: str) -> None:
     )
 
 
-def _resolve_config(mode: str, n: int, deviation_mode: str, config: str, tmp_path: str) -> str:
+def _resolve_config(mode: str, n: int, deviation_mode: str, config: str, tmp_path: str,
+                    ratios: str = "") -> str:
     """Build the smoke/full config and rewrite paths onto the volume.
 
     Writes the resolved YAML to ``tmp_path`` (the path ``eval.run_eval``
     consumes) and returns it. Dataset paths in the YAML are repo-root relative
     ("workspace/code/data/<f>.json"); prefer the copy uploaded to the volume's
     DATA_DIR, falling back to a bundled copy under CODE_DIR if present.
+    ``ratios`` overrides strategy.recompute_ratios (comma-separated).
     """
     import yaml
 
-    cfg = yaml.safe_load(_build_config_text(mode, n, deviation_mode, config))
+    cfg = yaml.safe_load(_build_config_text(mode, n, deviation_mode, config, ratios))
     cfg.setdefault("output", {})["results_dir"] = RESULTS_DIR
     for ds in cfg.get("datasets", {}).values():
         p = ds.get("path")
@@ -192,6 +201,8 @@ def run_cerebrium(
     repeats: int = 3,
     warmup: int = 1,
     check_correctness: bool = False,
+    ratios: str = "",
+    ttft_only: bool = False,
 ):
     """Run the CacheBlend eval (accuracy AND TTFT) on a Cerebrium GPU container.
 
@@ -206,7 +217,7 @@ def run_cerebrium(
     inference path -- the accuracy-drop vs TTFT-saving trade-off the paper
     reports, read off one implementation.
 
-    * ``mode``           -- ``smoke`` (wikimqa, n=3, ratio 0.15) or ``full``.
+    * ``mode``           -- ``smoke`` (wikimqa, n=3) or ``full``.
     * ``n``              -- override examples-per-dataset (0 = use the YAML).
     * ``deviation_mode`` -- HKVD selector: ``v`` (paper), ``k`` (YAML default) or
                             ``kv``. Empty = use the YAML.
@@ -214,18 +225,31 @@ def run_cerebrium(
     * ``repeats`` / ``warmup`` -- TTFT timed / warmup iterations per example.
     * ``check_correctness`` -- first verify single-pass r=1 reproduces a full
       forward (bit-exact first-token logits) before the measured run.
+    * ``ratios``         -- comma-separated recompute ratios to sweep, e.g.
+                            "0.1,0.15,0.2,0.4,0.6,0.8" (overrides the YAML grid).
+    * ``ttft_only``      -- time TTFT only (skip the accuracy phase).
+
+    The returned dict (and the JSON on the volume) includes an ``environment``
+    block: GPU, CUDA/cuDNN, torch/transformers versions, model and dtype.
     """
     _prepare_container(deviation_mode)
     tmp_path = _resolve_config(mode, n, deviation_mode, config,
-                               "/tmp/cerebrium_run_config.yaml")
+                               "/tmp/cerebrium_run_config.yaml", ratios=ratios)
 
-    from eval.run_eval import run_combined
+    if ttft_only:
+        from eval.run_eval import run_ttft_only
 
-    summary = run_combined(tmp_path, repeats=repeats, warmup=warmup,
-                           check_correctness=check_correctness)
+        summary = run_ttft_only(tmp_path, repeats=repeats, warmup=warmup)
+    else:
+        from eval.run_eval import run_combined
+
+        summary = run_combined(tmp_path, repeats=repeats, warmup=warmup,
+                               check_correctness=check_correctness)
 
     return {
         "mode": mode,
+        "ttft_only": ttft_only,
+        "environment": summary.get("environment", {}),
         "ttft": summary.get("ttft", {}),
         "phase_order": summary.get("phase_order", []),
         "isolation": summary.get("isolation", ""),
