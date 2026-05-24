@@ -114,27 +114,20 @@ Selector = Callable[[SelectionContext, float], torch.LongTensor]
 def chunk_attention_mass(ctx: SelectionContext, mass_source: str = "suffix") -> torch.Tensor:
     """Per-chunk-token attention mass: how much the queries attend to each token.
 
-    Builds the (post-RoPE) attention probabilities at the check layer and sums,
-    for each chunk key position ``j in [0, C)``, the probability assigned to it
-    by the chosen query rows, averaged over heads.
+    Computes attention probabilities at the check layer for the chosen query rows
+    only and sums, for each chunk key ``j in [0, C)``, the probability mass they
+    place on it, averaged over heads.
 
-    Args:
-        ctx: the check-layer context.
-        mass_source: ``"suffix"`` sums only over suffix/query rows (the tokens
-            whose generation we ultimately care about); ``"all"`` sums over every
-            (causally-allowed) query row.
+    Only the *query rows* are reduced (``mass_source="suffix"`` -> the T-C
+    suffix/query rows; ``"all"`` -> all T rows); the score matrix is therefore
+    ``(rows, T)`` rather than ``(T, T)``. With the suffix being short this avoids
+    the full (T, T) materialization the single-pass path deliberately keeps off
+    the L4 -- so this is safe to call inside production prefill, not just offline.
+    The softmax denominator still spans all causally-visible keys (correct
+    normalization); we keep only the chunk columns of the result.
 
-    Returns:
-        1-D tensor of length C, non-negative.
+    Returns a 1-D tensor of length C, non-negative.
     """
-    q = ctx.q_all                                   # (1, n_heads, T, d)
-    k = _repeat_kv(ctx.k_full, ctx.n_rep)           # (1, n_heads, T, d)
-    scores = torch.matmul(q, k.transpose(-1, -2)) * ctx.scale   # (1, n_heads, T, T)
-    pos = ctx.positions
-    causal = (pos.unsqueeze(0) <= pos.unsqueeze(1))  # (q_pos, k_pos): key <= query
-    scores = scores.masked_fill(~causal.view(1, 1, ctx.T, ctx.T), float("-inf"))
-    probs = torch.softmax(scores.float(), dim=-1)    # (1, n_heads, T_q, T_k)
-
     if mass_source == "suffix":
         rows = ctx.suffix_idx
     elif mass_source == "all":
@@ -144,8 +137,16 @@ def chunk_attention_mass(ctx: SelectionContext, mass_source: str = "suffix") -> 
     if rows.numel() == 0:                            # no suffix -> fall back to all
         rows = ctx.positions
 
-    mass = probs.index_select(2, rows).sum(dim=2)    # (1, n_heads, T_k)
-    mass = mass.mean(dim=1).squeeze(0)               # (T_k,)
+    q = ctx.q_all.index_select(2, rows)              # (1, n_heads, R, d)
+    k = _repeat_kv(ctx.k_full, ctx.n_rep)            # (1, n_heads, T, d)
+    scores = torch.matmul(q, k.transpose(-1, -2)) * ctx.scale   # (1, n_heads, R, T)
+    qpos = ctx.positions.index_select(0, rows)       # (R,)
+    causal = (ctx.positions.unsqueeze(0) <= qpos.unsqueeze(1))  # (R, T): key <= query
+    scores = scores.masked_fill(~causal.view(1, 1, rows.shape[0], ctx.T), float("-inf"))
+    probs = torch.softmax(scores.float(), dim=-1)    # (1, n_heads, R, T)
+
+    mass = probs.sum(dim=2)                           # (1, n_heads, T)
+    mass = mass.mean(dim=1).squeeze(0)                # (T,)
     return mass[: ctx.C]
 
 

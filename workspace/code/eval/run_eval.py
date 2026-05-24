@@ -202,6 +202,8 @@ def measure_accuracy(model, tokenizer, dtype, cfg: Dict[str, Any]) -> List[Dict[
     ratios = cfg["strategy"]["recompute_ratios"]
     check_layer = cfg["strategy"]["check_layer"]
     deviation_mode = cfg["strategy"].get("deviation_mode", "v")
+    selection_modes = cfg["strategy"].get("selection_modes", ["raw"])
+    mass_source = cfg["strategy"].get("mass_source", "suffix")
 
     results: List[Dict[str, Any]] = []
     for ds_name, ds_cfg in cfg["datasets"].items():
@@ -213,11 +215,12 @@ def measure_accuracy(model, tokenizer, dtype, cfg: Dict[str, Any]) -> List[Dict[
         metric = ds_cfg["metric"]
         ds_max_new = ds_cfg.get("max_new_tokens", max_new)  # MultiNews needs ~150-200
         print(f"[eval] accuracy: dataset={ds_name} n={len(examples)} "
-              f"metric={metric} max_new_tokens={ds_max_new}")
+              f"metric={metric} max_new_tokens={ds_max_new} selection={selection_modes}")
 
         store = ChunkKVStore(n_layers, dtype, device="cpu")
         scores_full, scores_reuse = [], []
-        scores_cb: Dict[float, List[float]] = {r: [] for r in ratios}
+        scores_cb: Dict[Tuple[str, float], List[float]] = {
+            (sel, r): [] for sel in selection_modes for r in ratios}
         for i, ex in enumerate(examples):
             full_prompt, chunk_strs = _build_prompts(ds_name, ex)
             suffix_text = _suffix_of(full_prompt, chunk_strs)
@@ -227,12 +230,14 @@ def measure_accuracy(model, tokenizer, dtype, cfg: Dict[str, Any]) -> List[Dict[
             scores_reuse.append(_score(metric, full_reuse_generate(
                 model, tokenizer, chunk_strs, query="", store=store,
                 max_new_tokens=ds_max_new, suffix=suffix_text), ex, tokenizer))
-            for r in ratios:
-                bc = BlendConfig(recompute_ratio=r, check_layer=check_layer,
-                                 deviation_mode=deviation_mode)
-                scores_cb[r].append(_score(metric, cacheblend_selective_generate(
-                    model, tokenizer, chunk_strs, query="", store=store,
-                    cfg=bc, max_new_tokens=ds_max_new, suffix=suffix_text), ex, tokenizer))
+            for sel in selection_modes:
+                for r in ratios:
+                    bc = BlendConfig(recompute_ratio=r, check_layer=check_layer,
+                                     deviation_mode=deviation_mode,
+                                     selection=sel, mass_source=mass_source)
+                    scores_cb[(sel, r)].append(_score(metric, cacheblend_selective_generate(
+                        model, tokenizer, chunk_strs, query="", store=store,
+                        cfg=bc, max_new_tokens=ds_max_new, suffix=suffix_text), ex, tokenizer))
             if (i + 1) % 10 == 0:
                 print(f"  {i+1}/{len(examples)} full={np.mean(scores_full):.3f} "
                       f"reuse={np.mean(scores_reuse):.3f}")
@@ -241,11 +246,15 @@ def measure_accuracy(model, tokenizer, dtype, cfg: Dict[str, Any]) -> List[Dict[
                         "mean": float(np.mean(scores_full)), "n": len(scores_full)})
         results.append({"dataset": ds_name, "strategy": "full_reuse", "ratio": None,
                         "mean": float(np.mean(scores_reuse)), "n": len(scores_reuse)})
-        for r in ratios:
-            results.append({"dataset": ds_name, "strategy": "cacheblend", "ratio": r,
-                            "deviation_mode": deviation_mode,
-                            "mean": float(np.mean(scores_cb[r])), "n": len(scores_cb[r])})
-            print(f"  cacheblend r={r} dev={deviation_mode}: mean={np.mean(scores_cb[r]):.3f}")
+        for sel in selection_modes:
+            for r in ratios:
+                key = (sel, r)
+                results.append({"dataset": ds_name, "strategy": "cacheblend", "ratio": r,
+                                "selection": sel, "deviation_mode": deviation_mode,
+                                "mean": float(np.mean(scores_cb[key])),
+                                "n": len(scores_cb[key])})
+                print(f"  cacheblend sel={sel} r={r} dev={deviation_mode}: "
+                      f"mean={np.mean(scores_cb[key]):.3f}")
     return results
 
 
@@ -263,6 +272,8 @@ def measure_ttft(
     ratios = cfg["strategy"]["recompute_ratios"]
     check_layer = cfg["strategy"]["check_layer"]
     deviation_mode = cfg["strategy"].get("deviation_mode", "v")
+    selection_modes = cfg["strategy"].get("selection_modes", ["raw"])
+    mass_source = cfg["strategy"].get("mass_source", "suffix")
 
     results: List[Dict[str, Any]] = []
     for ds_name, ds_cfg in cfg["datasets"].items():
@@ -270,12 +281,13 @@ def measure_ttft(
             print(f"[eval] ttft: dataset={ds_name}: {ds_cfg['path']} not found, skipping")
             continue
         examples = _load_dataset(ds_name, ds_cfg["path"], ds_cfg["n"])
-        print(f"[eval] ttft: dataset={ds_name} n={len(examples)}")
+        print(f"[eval] ttft: dataset={ds_name} n={len(examples)} selection={selection_modes}")
 
         max_new = 1  # TTFT = latency to the first token
         store = ChunkKVStore(n_layers, dtype, device="cpu")
         recompute_ms, reuse_ms = [], []
-        cb_ms: Dict[float, List[float]] = {r: [] for r in ratios}
+        cb_ms: Dict[Tuple[str, float], List[float]] = {
+            (sel, r): [] for sel in selection_modes for r in ratios}
 
         for ex in examples:
             full_prompt, chunk_strs = _build_prompts(ds_name, ex)
@@ -289,14 +301,16 @@ def measure_ttft(
                     model, tokenizer, chunk_strs, query="", store=store,
                     max_new_tokens=max_new, suffix=suffix_text),
                 repeats, warmup)))
-            for r in ratios:
-                bc = BlendConfig(recompute_ratio=r, check_layer=check_layer,
-                                 deviation_mode=deviation_mode)
-                cb_ms[r].append(np.median(_time_call(
-                    lambda bc=bc: cacheblend_selective_generate(
-                        model, tokenizer, chunk_strs, query="", store=store,
-                        cfg=bc, max_new_tokens=max_new, suffix=suffix_text),
-                    repeats, warmup)))
+            for sel in selection_modes:
+                for r in ratios:
+                    bc = BlendConfig(recompute_ratio=r, check_layer=check_layer,
+                                     deviation_mode=deviation_mode,
+                                     selection=sel, mass_source=mass_source)
+                    cb_ms[(sel, r)].append(np.median(_time_call(
+                        lambda bc=bc: cacheblend_selective_generate(
+                            model, tokenizer, chunk_strs, query="", store=store,
+                            cfg=bc, max_new_tokens=max_new, suffix=suffix_text),
+                        repeats, warmup)))
 
         rec_agg = _agg(recompute_ms)
         rec_median = rec_agg["ttft_ms_median"]
@@ -307,21 +321,25 @@ def measure_ttft(
                         "n": len(reuse_ms),
                         "speedup_vs_recompute": rec_median / reuse_agg["ttft_ms_median"],
                         **reuse_agg})
-        for r in ratios:
-            cb_agg = _agg(cb_ms[r])
-            results.append({"dataset": ds_name, "strategy": "cacheblend", "ratio": r,
-                            "deviation_mode": deviation_mode, "n": len(cb_ms[r]),
-                            "speedup_vs_recompute": rec_median / cb_agg["ttft_ms_median"],
-                            **cb_agg})
+        for sel in selection_modes:
+            for r in ratios:
+                cb_agg = _agg(cb_ms[(sel, r)])
+                results.append({"dataset": ds_name, "strategy": "cacheblend", "ratio": r,
+                                "selection": sel, "deviation_mode": deviation_mode,
+                                "n": len(cb_ms[(sel, r)]),
+                                "speedup_vs_recompute": rec_median / cb_agg["ttft_ms_median"],
+                                **cb_agg})
 
         print(f"  full_recompute median={rec_median:.1f}ms  "
               f"full_reuse median={reuse_agg['ttft_ms_median']:.1f}ms "
               f"({rec_median / reuse_agg['ttft_ms_median']:.2f}x)")
-        for r in ratios:
-            row = next(x for x in results if x["dataset"] == ds_name
-                       and x["strategy"] == "cacheblend" and x["ratio"] == r)
-            print(f"  cacheblend r={r} median={row['ttft_ms_median']:.1f}ms "
-                  f"({row['speedup_vs_recompute']:.2f}x)")
+        for sel in selection_modes:
+            for r in ratios:
+                row = next(x for x in results if x["dataset"] == ds_name
+                           and x["strategy"] == "cacheblend" and x["ratio"] == r
+                           and x.get("selection") == sel)
+                print(f"  cacheblend sel={sel} r={r} median={row['ttft_ms_median']:.1f}ms "
+                      f"({row['speedup_vs_recompute']:.2f}x)")
     return results
 
 
@@ -335,17 +353,19 @@ def _merge(ttft_rows: List[Dict[str, Any]],
     """
     TTFT_FIELDS = ("ttft_ms_median", "ttft_ms_mean", "ttft_ms_p90", "speedup_vs_recompute")
 
-    def key(r: Dict[str, Any]) -> Tuple[str, str, Optional[float]]:
-        return (r["dataset"], r["strategy"], r.get("ratio"))
+    def key(r: Dict[str, Any]) -> Tuple[str, str, Optional[float], Optional[str]]:
+        return (r["dataset"], r["strategy"], r.get("ratio"), r.get("selection"))
 
-    merged: "Dict[Tuple[str, str, Optional[float]], Dict[str, Any]]" = {}
-    order: List[Tuple[str, str, Optional[float]]] = []
+    merged: "Dict[Tuple[str, str, Optional[float], Optional[str]], Dict[str, Any]]" = {}
+    order: List[Tuple[str, str, Optional[float], Optional[str]]] = []
 
     def slot(r: Dict[str, Any]) -> Dict[str, Any]:
         k = key(r)
         if k not in merged:
             merged[k] = {"dataset": r["dataset"], "strategy": r["strategy"],
                          "ratio": r.get("ratio"), "n": r.get("n")}
+            if r.get("selection") is not None:
+                merged[k]["selection"] = r["selection"]
             order.append(k)
         if "deviation_mode" in r and "deviation_mode" not in merged[k]:
             merged[k]["deviation_mode"] = r["deviation_mode"]
@@ -439,13 +459,14 @@ def run_combined(config_path: str, repeats: int = 3, warmup: int = 1,
     for row in results:
         ratio = row.get("ratio")
         ratio_s = f"r={ratio:.2f}" if isinstance(ratio, (int, float)) else "-"
+        sel_s = row.get("selection") or "-"
         mean = row.get("mean")
         mean_s = f"{mean:.3f}" if isinstance(mean, (int, float)) else "n/a"
         ttft = row.get("ttft_ms_median")
         ttft_s = f"{ttft:.1f}ms" if isinstance(ttft, (int, float)) else "n/a"
         spd = row.get("speedup_vs_recompute")
         spd_s = f"{spd:.2f}x" if isinstance(spd, (int, float)) else "n/a"
-        print(f"  {row['dataset']:<14} {row['strategy']:<16} {ratio_s:<8} "
+        print(f"  {row['dataset']:<14} {row['strategy']:<16} {sel_s:<13} {ratio_s:<8} "
               f"acc={mean_s} ttft={ttft_s} ({spd_s}) n={row.get('n')}")
     return summary
 
@@ -475,7 +496,8 @@ def run_ttft_only(config_path: str, repeats: int = 3, warmup: int = 1) -> dict:
     for row in results:
         ratio = row.get("ratio")
         ratio_s = f"r={ratio:.2f}" if isinstance(ratio, (int, float)) else "-"
-        print(f"  {row['dataset']:<14} {row['strategy']:<16} {ratio_s:<8} "
+        sel_s = row.get("selection") or "-"
+        print(f"  {row['dataset']:<14} {row['strategy']:<16} {sel_s:<13} {ratio_s:<8} "
               f"median={row['ttft_ms_median']:.1f}ms p90={row['ttft_ms_p90']:.1f}ms "
               f"speedup={row['speedup_vs_recompute']:.2f}x n={row['n']}")
     return summary

@@ -137,6 +137,42 @@ def test_score_selectors_r1_matches_full_for_all_rules(tiny_model):
         assert row["logit_l2"] < 1e-3
 
 
+def test_cfg_attn_weighted_matches_explicit_selector(tiny_model):
+    """cfg.selection='attn_weighted' must equal passing the selector explicitly."""
+    model = tiny_model
+    full_ids = torch.randint(0, model.config.vocab_size, (1, 12))
+    C = 8
+    from cacheblend.selection import attention_weighted_selector
+
+    cache_a = _manual_fused_cache(model, C, seed=6)
+    cache_b = _manual_fused_cache(model, C, seed=6)
+    cfg = BlendConfig(recompute_ratio=0.25, check_layer=1, deviation_mode="v",
+                      selection="attn_weighted", mass_source="suffix")
+    _, logits_cfg, hkvd_cfg = _selective_prefill(
+        model, cache_a, full_ids, C, cfg, build_cache=False)
+    cfg_raw = BlendConfig(recompute_ratio=0.25, check_layer=1, deviation_mode="v")
+    _, logits_inj, hkvd_inj = _selective_prefill(
+        model, cache_b, full_ids, C, cfg_raw, build_cache=False,
+        selector=attention_weighted_selector(mode="v", mass_source="suffix"))
+    assert torch.equal(hkvd_cfg, hkvd_inj)
+    assert torch.allclose(logits_cfg, logits_inj, atol=0, rtol=0)
+
+
+def test_cfg_attn_weighted_r1_matches_full(tiny_model):
+    """At r=1 the attn_weighted cfg path is still a full forward -> matches GT."""
+    model = tiny_model
+    full_ids = torch.randint(0, model.config.vocab_size, (1, 12))
+    C = 8
+    cache = _manual_fused_cache(model, C, seed=7)
+    cfg = BlendConfig(recompute_ratio=1.0, check_layer=1, deviation_mode="v",
+                      selection="attn_weighted")
+    _, logits, hkvd = _selective_prefill(model, cache, full_ids, C, cfg, build_cache=False)
+    gt = model(full_ids, use_cache=False).logits[:, -1, :].float()
+    assert hkvd.numel() == C
+    assert torch.argmax(logits.float(), -1).item() == torch.argmax(gt, -1).item()
+    assert (logits.float() - gt).norm().item() < 1e-3
+
+
 def test_score_selectors_rows_wellformed(tiny_model):
     model = tiny_model
     full_ids = torch.randint(0, model.config.vocab_size, (1, 14))

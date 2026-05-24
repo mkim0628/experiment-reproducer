@@ -51,6 +51,14 @@ strategy:
   # numbers), or "kv" (sum of K and V squared-L2 reductions). Switch to "v"
   # for direct comparison with the paper.
   deviation_mode: k
+  # HKVD ranking rule(s), evaluated as a grid alongside recompute_ratios.
+  # "raw" = released CacheBlend (top-r% by raw KV deviation). "attn_weighted"
+  # = Stage-1 candidate (deviation x attention mass). List both to compare the
+  # accuracy/TTFT Pareto frontier in one run; drop to [raw] for the paper numbers.
+  selection_modes: [raw, attn_weighted]
+  # For selection="attn_weighted": query rows defining the attention mass --
+  # "suffix" (cheap, R x T scores) or "all".
+  mass_source: suffix
 
 generation:
   max_new_tokens: 32

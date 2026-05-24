@@ -134,6 +134,16 @@ def _selective_prefill(
     hkvd_idx: Optional[torch.Tensor] = None
     blended_cache = DynamicCache() if build_cache else None
 
+    # Stage-1: cfg.selection drives the ranking when no selector is injected.
+    # "raw" keeps the released inline path (byte-identical); "attn_weighted"
+    # builds the attention-weighted selector. An explicit ``selector`` (e.g. the
+    # analysis harness's oracle) always wins over cfg.selection.
+    if selector is None and getattr(cfg, "selection", "raw") == "attn_weighted":
+        from .selection import attention_weighted_selector
+
+        selector = attention_weighted_selector(
+            mode=cfg.deviation_mode, mass_source=getattr(cfg, "mass_source", "suffix"))
+
     for li in range(L):
         layer = model.model.layers[li]
         attn = layer.self_attn
@@ -347,7 +357,8 @@ def check_r1_matches_full_forward(
     only looks at the first-token logits on the same ids.
     """
     cfg_r1 = BlendConfig(recompute_ratio=1.0, check_layer=cfg.check_layer,
-                         deviation_mode=cfg.deviation_mode)
+                         deviation_mode=cfg.deviation_mode,
+                         selection=cfg.selection, mass_source=cfg.mass_source)
     fused_cache, full_ids, total_chunk_len = prepare_selective_inputs(
         model, tokenizer, chunks, store, suffix=suffix, query=query)
     try:

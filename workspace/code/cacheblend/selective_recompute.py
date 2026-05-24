@@ -27,6 +27,8 @@ import torch
 
 # ----------------------------------------------------------------------- config
 DEVIATION_MODES = ("v", "k", "kv")
+SELECTION_MODES = ("raw", "attn_weighted")
+MASS_SOURCES = ("suffix", "all")
 
 
 @dataclass
@@ -40,12 +42,29 @@ class BlendConfig:
     # for this reproduction -- this is an ablation choice, NOT the paper's
     # measured setting. Set to "v" to match the official numbers.
     deviation_mode: str = "k"
+    # HKVD ranking rule. "raw" = released CacheBlend (top-r% by raw KV deviation).
+    # "attn_weighted" = Stage-1 candidate: weight each token's deviation by the
+    # attention mass the query/suffix places on it, so budget goes to tokens that
+    # both moved AND are attended to. "raw" reproduces the official numbers.
+    selection: str = "raw"
+    # For selection="attn_weighted": which query rows define the attention mass.
+    # "suffix" (default) = the suffix/query rows whose generation we care about
+    # (cheap: R x T scores, R = suffix length); "all" = every query row.
+    mass_source: str = "suffix"
 
     def __post_init__(self) -> None:
         if self.deviation_mode not in DEVIATION_MODES:
             raise ValueError(
                 f"deviation_mode must be one of {DEVIATION_MODES}; "
                 f"got {self.deviation_mode!r}"
+            )
+        if self.selection not in SELECTION_MODES:
+            raise ValueError(
+                f"selection must be one of {SELECTION_MODES}; got {self.selection!r}"
+            )
+        if self.mass_source not in MASS_SOURCES:
+            raise ValueError(
+                f"mass_source must be one of {MASS_SOURCES}; got {self.mass_source!r}"
             )
 
 

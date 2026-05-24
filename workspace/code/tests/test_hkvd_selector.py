@@ -117,6 +117,17 @@ def test_blendconfig_validates_deviation_mode() -> None:
         BlendConfig(deviation_mode="kq")
 
 
+def test_blendconfig_selection_defaults_and_validation() -> None:
+    cfg = BlendConfig()
+    assert cfg.selection == "raw"           # released algorithm by default
+    assert cfg.mass_source == "suffix"
+    BlendConfig(selection="attn_weighted")
+    with pytest.raises(ValueError):
+        BlendConfig(selection="magic")
+    with pytest.raises(ValueError):
+        BlendConfig(mass_source="prefix")
+
+
 def test_k_vs_v_deviation_can_pick_different_indices() -> None:
     # Construct a case where K diff is large at token 0 and V diff is large
     # at token 4 -> top-1 selection should differ between modes.
