@@ -83,6 +83,8 @@ def _selective_prefill(
     total_chunk_len: int,
     cfg: BlendConfig,
     build_cache: bool = True,
+    selector=None,
+    selector_extra=None,
 ) -> Tuple[Optional[DynamicCache], torch.Tensor, torch.LongTensor]:
     """Run the single-pass selective-recompute prefill.
 
@@ -97,6 +99,12 @@ def _selective_prefill(
             decoding can continue. Set False for first-token-only uses (TTFT,
             logit checks) to avoid materializing the whole-prompt cache -- a big
             VRAM saving on long prompts.
+        selector: optional ``Callable[[SelectionContext, float], LongTensor]``
+            (see :mod:`cacheblend.selection`). When given, it -- not the built-in
+            top-r% raw KV deviation -- chooses the HKVD chunk indices at the check
+            layer. ``None`` reproduces the released algorithm exactly.
+        selector_extra: optional dict merged into ``SelectionContext.extra`` (e.g.
+            the oracle's true full-prefill chunk KV at the check layer).
 
     Returns:
         (blended_cache, logits_last, hkvd_idx) -- the blended KV cache over all
@@ -172,12 +180,25 @@ def _selective_prefill(
             v_fresh_chunk = v_act[:, :, :C, :]
             k_cached_chunk = fused_cache.layers[li].keys.to(device)
             v_cached_chunk = fused_cache.layers[li].values.to(device)
-            deviation = compute_kv_deviation(
-                k_fresh_chunk, k_cached_chunk,
-                v_fresh_chunk, v_cached_chunk,
-                mode=cfg.deviation_mode,
-            )  # (C,)
-            hkvd_idx = select_hkvd_indices(deviation, cfg.recompute_ratio).to(device)
+            if selector is None:
+                deviation = compute_kv_deviation(
+                    k_fresh_chunk, k_cached_chunk,
+                    v_fresh_chunk, v_cached_chunk,
+                    mode=cfg.deviation_mode,
+                )  # (C,)
+                hkvd_idx = select_hkvd_indices(deviation, cfg.recompute_ratio).to(device)
+            else:
+                from .selection import SelectionContext
+
+                ctx = SelectionContext(
+                    k_fresh_chunk=k_fresh_chunk, v_fresh_chunk=v_fresh_chunk,
+                    k_cached_chunk=k_cached_chunk, v_cached_chunk=v_cached_chunk,
+                    q_all=q, k_full=k_full, v_full=v_full,
+                    positions=positions, suffix_idx=suffix_idx,
+                    scale=scale, n_rep=n_rep,
+                    extra=dict(selector_extra or {}),
+                )
+                hkvd_idx = selector(ctx, cfg.recompute_ratio).to(device)
 
         # ---- attention: active queries over all T (blended) keys ----
         kf = _repeat_kv(k_full, n_rep)
