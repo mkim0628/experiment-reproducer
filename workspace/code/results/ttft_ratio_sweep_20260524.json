@@ -1,0 +1,146 @@
+{
+  "config": {
+    "datasets": {
+      "wikimqa": {
+        "metric": "f1",
+        "n": 10,
+        "path": "/persistent-storage/cacheblend-data/wikimqa_s.json"
+      }
+    },
+    "generation": {
+      "do_sample": false,
+      "max_new_tokens": 32,
+      "temperature": 0.0
+    },
+    "model": {
+      "device": "cuda",
+      "dtype": "float16",
+      "name": "mistralai/Mistral-7B-Instruct-v0.2"
+    },
+    "output": {
+      "results_dir": "/persistent-storage/cacheblend-results"
+    },
+    "seed": 42,
+    "strategy": {
+      "check_layer": 1,
+      "deviation_mode": "k",
+      "num_chunks": null,
+      "recompute_ratios": [
+        0.1,
+        0.15,
+        0.2,
+        0.4,
+        0.6,
+        0.8
+      ]
+    }
+  },
+  "environment": {
+    "timestamp_utc": "2026-05-24T10:36:54Z",
+    "python": "3.11.0",
+    "platform": "Linux-6.17.0-1013-aws-x86_64-with-glibc2.36",
+    "torch": "2.7.1+cu126",
+    "transformers": "5.8.1",
+    "cuda": "12.6",
+    "cudnn": 90501,
+    "gpu": "NVIDIA L4",
+    "gpu_count": 1,
+    "gpu_memory_total_gb": 23.66,
+    "model": "mistralai/Mistral-7B-Instruct-v0.2",
+    "dtype": "float16"
+  },
+  "ttft": {
+    "repeats": 3,
+    "warmup": 1,
+    "max_new_tokens": 1,
+    "note": "cacheblend is the single-pass selective recompute (the same implementation scored for accuracy in run_combined)"
+  },
+  "results": [
+    {
+      "dataset": "wikimqa",
+      "strategy": "full_recompute",
+      "ratio": null,
+      "n": 10,
+      "speedup_vs_recompute": 1.0,
+      "ttft_ms_median": 2466.3796899999966,
+      "ttft_ms_mean": 2465.140039100004,
+      "ttft_ms_p90": 2577.63013069997
+    },
+    {
+      "dataset": "wikimqa",
+      "strategy": "full_reuse",
+      "ratio": null,
+      "n": 10,
+      "speedup_vs_recompute": 8.34791262269627,
+      "ttft_ms_median": 295.448671000031,
+      "ttft_ms_mean": 296.4575920999778,
+      "ttft_ms_p90": 309.61114630000566
+    },
+    {
+      "dataset": "wikimqa",
+      "strategy": "cacheblend",
+      "ratio": 0.1,
+      "deviation_mode": "k",
+      "n": 10,
+      "speedup_vs_recompute": 3.0376909260938607,
+      "ttft_ms_median": 811.9258180000202,
+      "ttft_ms_mean": 814.3046432000119,
+      "ttft_ms_p90": 859.2395554999371
+    },
+    {
+      "dataset": "wikimqa",
+      "strategy": "cacheblend",
+      "ratio": 0.15,
+      "deviation_mode": "k",
+      "n": 10,
+      "speedup_vs_recompute": 2.5901473682541685,
+      "ttft_ms_median": 952.2159704999353,
+      "ttft_ms_mean": 950.925871099946,
+      "ttft_ms_p90": 988.8769816000035
+    },
+    {
+      "dataset": "wikimqa",
+      "strategy": "cacheblend",
+      "ratio": 0.2,
+      "deviation_mode": "k",
+      "n": 10,
+      "speedup_vs_recompute": 2.2353073488831265,
+      "ttft_ms_median": 1103.3738565000135,
+      "ttft_ms_mean": 1093.9702128999897,
+      "ttft_ms_p90": 1150.1916955999718
+    },
+    {
+      "dataset": "wikimqa",
+      "strategy": "cacheblend",
+      "ratio": 0.4,
+      "deviation_mode": "k",
+      "n": 10,
+      "speedup_vs_recompute": 1.4672604781303278,
+      "ttft_ms_median": 1680.9419505000278,
+      "ttft_ms_mean": 1692.4975693999957,
+      "ttft_ms_p90": 1805.6925902999978
+    },
+    {
+      "dataset": "wikimqa",
+      "strategy": "cacheblend",
+      "ratio": 0.6,
+      "deviation_mode": "k",
+      "n": 10,
+      "speedup_vs_recompute": 1.050681320773428,
+      "ttft_ms_median": 2347.409857999992,
+      "ttft_ms_mean": 2331.733649800003,
+      "ttft_ms_p90": 2473.0524459999515
+    },
+    {
+      "dataset": "wikimqa",
+      "strategy": "cacheblend",
+      "ratio": 0.8,
+      "deviation_mode": "k",
+      "n": 10,
+      "speedup_vs_recompute": 0.8467802200006616,
+      "ttft_ms_median": 2912.656238000068,
+      "ttft_ms_mean": 2938.509225100018,
+      "ttft_ms_p90": 3131.0545290999926
+    }
+  ]
+}
