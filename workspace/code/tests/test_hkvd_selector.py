@@ -12,6 +12,7 @@ from cacheblend.selective_recompute import (
     compute_k_deviation,
     compute_kv_deviation,
     compute_v_deviation,
+    select_by_threshold,
     select_hkvd_indices,
 )
 
@@ -107,6 +108,67 @@ def test_kv_deviation_rejects_unknown_mode() -> None:
     t = torch.zeros(1, 1, 3, 2)
     with pytest.raises(ValueError):
         compute_kv_deviation(t, t, t, t, mode="qk")
+
+
+# ----------------------------------------------- Stage-2 threshold budget
+def test_threshold_selects_relative_to_max() -> None:
+    score = torch.tensor([0.1, 1.0, 0.5, 0.9, 0.05])
+    # tau=0.5 -> keep score >= 0.5*max(1.0)=0.5 -> tokens {1,2,3}, sorted.
+    assert select_by_threshold(score, 0.5).tolist() == [1, 2, 3]
+    # tau=0.95 -> only the peak (token 1).
+    assert select_by_threshold(score, 0.95).tolist() == [1]
+    # tau=0.0 -> everything (subject to default max_frac=1.0).
+    assert select_by_threshold(score, 0.0).tolist() == [0, 1, 2, 3, 4]
+
+
+def test_threshold_is_monotonic_in_tau() -> None:
+    torch.manual_seed(0)
+    score = torch.rand(20)
+    counts = [select_by_threshold(score, t).numel() for t in (0.0, 0.25, 0.5, 0.75, 1.0)]
+    assert counts == sorted(counts, reverse=True)  # higher tau -> fewer (or equal)
+
+
+def test_threshold_min_frac_floor() -> None:
+    # Only token 0 crosses tau, but min_frac forces a 3-token floor.
+    score = torch.zeros(10)
+    score[0] = 1.0
+    out = select_by_threshold(score, 0.5, min_frac=0.3)  # ceil(0.3*10)=3
+    assert out.numel() == 3
+    assert 0 in out.tolist()  # the real peak is always included
+
+
+def test_threshold_max_frac_cap() -> None:
+    score = torch.ones(10)  # all equal -> all cross any tau<=1
+    out = select_by_threshold(score, 0.5, max_frac=0.2)  # ceil(0.2*10)=2
+    assert out.numel() == 2
+
+
+def test_threshold_zero_signal_recomputes_floor_not_nothing() -> None:
+    score = torch.zeros(8)
+    # No positive signal: must not collapse to 0 tokens (that would be pure reuse).
+    assert select_by_threshold(score, 0.5).numel() == 1               # default floor
+    assert select_by_threshold(score, 0.5, min_frac=0.25).numel() == 2  # ceil(0.25*8)
+
+
+def test_threshold_returns_sorted_and_validates() -> None:
+    score = torch.tensor([0.2, 0.9, 0.4, 1.0])
+    out = select_by_threshold(score, 0.3)
+    assert torch.equal(out, torch.sort(out).values)
+    with pytest.raises(ValueError):
+        select_by_threshold(score, 1.5)
+    with pytest.raises(ValueError):
+        select_by_threshold(score.unsqueeze(0), 0.5)  # not 1-D
+
+
+def test_blendconfig_validates_budget_mode_and_threshold() -> None:
+    assert BlendConfig().budget_mode == "ratio"          # released default
+    BlendConfig(budget_mode="threshold", threshold=0.5, min_frac=0.05, max_frac=0.8)
+    with pytest.raises(ValueError):
+        BlendConfig(budget_mode="adaptive")              # unknown mode
+    with pytest.raises(ValueError):
+        BlendConfig(threshold=1.5)
+    with pytest.raises(ValueError):
+        BlendConfig(min_frac=0.6, max_frac=0.4)          # min > max
 
 
 def test_blendconfig_validates_deviation_mode() -> None:

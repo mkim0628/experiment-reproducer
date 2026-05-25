@@ -190,6 +190,50 @@ def _environment_info(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ----------------------------------------------------------------- accuracy
+def _budget_points(strat: Dict[str, Any]) -> Tuple[str, List[float], Dict[str, float]]:
+    """Resolve the recompute-budget sweep from the strategy config.
+
+    Returns ``(budget_mode, points, extra)``. ``budget_mode="ratio"`` sweeps
+    ``recompute_ratios`` (fixed top-r%); ``"threshold"`` sweeps ``thresholds`` (tau)
+    with shared ``min_frac``/``max_frac`` clamps. The sweep axis (the per-cell
+    "point") is a ratio r or a threshold tau respectively.
+    """
+    if strat.get("budget_mode", "ratio") == "threshold":
+        return "threshold", list(strat.get("thresholds", [0.5])), {
+            "min_frac": strat.get("min_frac", 0.0),
+            "max_frac": strat.get("max_frac", 1.0)}
+    return "ratio", list(strat["recompute_ratios"]), {}
+
+
+def _blend_cfg(strat: Dict[str, Any], sel: str, budget_mode: str, pt: float,
+               extra: Dict[str, float]) -> BlendConfig:
+    """Build the BlendConfig for one (selection, budget point) cell."""
+    common = dict(check_layer=strat["check_layer"],
+                  deviation_mode=strat.get("deviation_mode", "v"),
+                  selection=sel, mass_source=strat.get("mass_source", "suffix"))
+    if budget_mode == "threshold":
+        return BlendConfig(budget_mode="threshold", threshold=pt,
+                           min_frac=extra["min_frac"], max_frac=extra["max_frac"],
+                           **common)
+    return BlendConfig(recompute_ratio=pt, **common)
+
+
+def _budget_fields(budget_mode: str, pt: float,
+                   mean_budget: Optional[float] = None) -> Dict[str, Any]:
+    """Result-row fields naming the budget point (kept distinct so _merge keys it).
+
+    Ratio mode puts the point in ``ratio`` (back-compat); threshold mode leaves
+    ``ratio`` None and records ``threshold`` plus, when known, the realized
+    ``mean_budget`` (mean recomputed fraction actually selected).
+    """
+    if budget_mode == "threshold":
+        out: Dict[str, Any] = {"ratio": None, "threshold": pt, "budget_mode": "threshold"}
+        if mean_budget is not None:
+            out["mean_budget"] = mean_budget
+        return out
+    return {"ratio": pt, "budget_mode": "ratio"}
+
+
 def measure_accuracy(model, tokenizer, dtype, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Accuracy phase: full-length generation + metric per (dataset, strategy, ratio).
 
@@ -199,11 +243,11 @@ def measure_accuracy(model, tokenizer, dtype, cfg: Dict[str, Any]) -> List[Dict[
     """
     n_layers = model.config.num_hidden_layers
     max_new = cfg["generation"]["max_new_tokens"]
-    ratios = cfg["strategy"]["recompute_ratios"]
-    check_layer = cfg["strategy"]["check_layer"]
-    deviation_mode = cfg["strategy"].get("deviation_mode", "v")
-    selection_modes = cfg["strategy"].get("selection_modes", ["raw"])
-    mass_source = cfg["strategy"].get("mass_source", "suffix")
+    strat = cfg["strategy"]
+    check_layer = strat["check_layer"]
+    deviation_mode = strat.get("deviation_mode", "v")
+    selection_modes = strat.get("selection_modes", ["raw"])
+    budget_mode, points, extra = _budget_points(strat)
 
     results: List[Dict[str, Any]] = []
     for ds_name, ds_cfg in cfg["datasets"].items():
@@ -214,12 +258,15 @@ def measure_accuracy(model, tokenizer, dtype, cfg: Dict[str, Any]) -> List[Dict[
         examples = _load_dataset(ds_name, ds_cfg["path"], ds_cfg["n"])
         metric = ds_cfg["metric"]
         ds_max_new = ds_cfg.get("max_new_tokens", max_new)  # MultiNews needs ~150-200
-        print(f"[eval] accuracy: dataset={ds_name} n={len(examples)} "
-              f"metric={metric} max_new_tokens={ds_max_new} selection={selection_modes}")
+        print(f"[eval] accuracy: dataset={ds_name} n={len(examples)} metric={metric} "
+              f"max_new={ds_max_new} selection={selection_modes} {budget_mode}={points}")
 
         scores_full, scores_reuse = [], []
         scores_cb: Dict[Tuple[str, float], List[float]] = {
-            (sel, r): [] for sel in selection_modes for r in ratios}
+            (sel, pt): [] for sel in selection_modes for pt in points}
+        # realized recompute fraction per cell (threshold mode's adaptive budget)
+        budget_cb: Dict[Tuple[str, float], List[float]] = {
+            (sel, pt): [] for sel in selection_modes for pt in points}
         n_skipped = 0
         for i, ex in enumerate(examples):
             full_prompt, chunk_strs = _build_prompts(ds_name, ex)
@@ -242,15 +289,16 @@ def measure_accuracy(model, tokenizer, dtype, cfg: Dict[str, Any]) -> List[Dict[
                     model, tokenizer, chunk_strs, query="", store=store,
                     max_new_tokens=ds_max_new, suffix=suffix_text), ex, tokenizer)
                 s_cb: Dict[Tuple[str, float], float] = {}
+                b_cb: Dict[Tuple[str, float], float] = {}
                 for sel in selection_modes:
-                    for r in ratios:
-                        bc = BlendConfig(recompute_ratio=r, check_layer=check_layer,
-                                         deviation_mode=deviation_mode,
-                                         selection=sel, mass_source=mass_source)
-                        s_cb[(sel, r)] = _score(metric, cacheblend_selective_generate(
+                    for pt in points:
+                        bc = _blend_cfg(strat, sel, budget_mode, pt, extra)
+                        stats: Dict[str, Any] = {}
+                        s_cb[(sel, pt)] = _score(metric, cacheblend_selective_generate(
                             model, tokenizer, chunk_strs, query="", store=store,
-                            cfg=bc, max_new_tokens=ds_max_new, suffix=suffix_text),
-                            ex, tokenizer)
+                            cfg=bc, max_new_tokens=ds_max_new, suffix=suffix_text,
+                            stats=stats), ex, tokenizer)
+                        b_cb[(sel, pt)] = stats.get("budget_frac", float("nan"))
             except Exception as e:  # noqa: BLE001 -- isolate one bad example
                 n_skipped += 1
                 print(f"[eval] WARN accuracy: skipping {ds_name} ex {i}: "
@@ -263,6 +311,7 @@ def measure_accuracy(model, tokenizer, dtype, cfg: Dict[str, Any]) -> List[Dict[
             scores_reuse.append(s_reuse)
             for key, val in s_cb.items():
                 scores_cb[key].append(val)
+                budget_cb[key].append(b_cb[key])
             if (i + 1) % 10 == 0:
                 print(f"  {i+1}/{len(examples)} full={np.mean(scores_full):.3f} "
                       f"reuse={np.mean(scores_reuse):.3f} skipped={n_skipped}")
@@ -280,14 +329,18 @@ def measure_accuracy(model, tokenizer, dtype, cfg: Dict[str, Any]) -> List[Dict[
                         "mean": float(np.mean(scores_reuse)), "n": len(scores_reuse),
                         "n_skipped": n_skipped})
         for sel in selection_modes:
-            for r in ratios:
-                key = (sel, r)
-                results.append({"dataset": ds_name, "strategy": "cacheblend", "ratio": r,
-                                "selection": sel, "deviation_mode": deviation_mode,
-                                "mean": float(np.mean(scores_cb[key])),
-                                "n": len(scores_cb[key])})
-                print(f"  cacheblend sel={sel} r={r} dev={deviation_mode}: "
-                      f"mean={np.mean(scores_cb[key]):.3f}")
+            for pt in points:
+                key = (sel, pt)
+                mean_budget = (float(np.mean(budget_cb[key]))
+                               if budget_mode == "threshold" and budget_cb[key] else None)
+                row = {"dataset": ds_name, "strategy": "cacheblend",
+                       "selection": sel, "deviation_mode": deviation_mode,
+                       "mean": float(np.mean(scores_cb[key])), "n": len(scores_cb[key]),
+                       **_budget_fields(budget_mode, pt, mean_budget)}
+                results.append(row)
+                budget_str = f" budget={mean_budget:.3f}" if mean_budget is not None else ""
+                print(f"  cacheblend sel={sel} {budget_mode}={pt} dev={deviation_mode}: "
+                      f"mean={np.mean(scores_cb[key]):.3f}{budget_str}")
     return results
 
 
@@ -302,11 +355,11 @@ def measure_ttft(
     paper's assumption that chunk KV is already cached.
     """
     n_layers = model.config.num_hidden_layers
-    ratios = cfg["strategy"]["recompute_ratios"]
-    check_layer = cfg["strategy"]["check_layer"]
-    deviation_mode = cfg["strategy"].get("deviation_mode", "v")
-    selection_modes = cfg["strategy"].get("selection_modes", ["raw"])
-    mass_source = cfg["strategy"].get("mass_source", "suffix")
+    strat = cfg["strategy"]
+    check_layer = strat["check_layer"]
+    deviation_mode = strat.get("deviation_mode", "v")
+    selection_modes = strat.get("selection_modes", ["raw"])
+    budget_mode, points, extra = _budget_points(strat)
 
     results: List[Dict[str, Any]] = []
     for ds_name, ds_cfg in cfg["datasets"].items():
@@ -314,12 +367,13 @@ def measure_ttft(
             print(f"[eval] ttft: dataset={ds_name}: {ds_cfg['path']} not found, skipping")
             continue
         examples = _load_dataset(ds_name, ds_cfg["path"], ds_cfg["n"])
-        print(f"[eval] ttft: dataset={ds_name} n={len(examples)} selection={selection_modes}")
+        print(f"[eval] ttft: dataset={ds_name} n={len(examples)} "
+              f"selection={selection_modes} {budget_mode}={points}")
 
         max_new = 1  # TTFT = latency to the first token
         recompute_ms, reuse_ms = [], []
         cb_ms: Dict[Tuple[str, float], List[float]] = {
-            (sel, r): [] for sel in selection_modes for r in ratios}
+            (sel, pt): [] for sel in selection_modes for pt in points}
         n_skipped = 0
 
         for i, ex in enumerate(examples):
@@ -343,11 +397,9 @@ def measure_ttft(
                     repeats, warmup))
                 cb_one: Dict[Tuple[str, float], float] = {}
                 for sel in selection_modes:
-                    for r in ratios:
-                        bc = BlendConfig(recompute_ratio=r, check_layer=check_layer,
-                                         deviation_mode=deviation_mode,
-                                         selection=sel, mass_source=mass_source)
-                        cb_one[(sel, r)] = np.median(_time_call(
+                    for pt in points:
+                        bc = _blend_cfg(strat, sel, budget_mode, pt, extra)
+                        cb_one[(sel, pt)] = np.median(_time_call(
                             lambda bc=bc: cacheblend_selective_generate(
                                 model, tokenizer, chunk_strs, query="", store=store,
                                 cfg=bc, max_new_tokens=max_new, suffix=suffix_text),
@@ -380,24 +432,23 @@ def measure_ttft(
                         "speedup_vs_recompute": rec_median / reuse_agg["ttft_ms_median"],
                         **reuse_agg})
         for sel in selection_modes:
-            for r in ratios:
-                cb_agg = _agg(cb_ms[(sel, r)])
-                results.append({"dataset": ds_name, "strategy": "cacheblend", "ratio": r,
+            for pt in points:
+                cb_agg = _agg(cb_ms[(sel, pt)])
+                results.append({"dataset": ds_name, "strategy": "cacheblend",
                                 "selection": sel, "deviation_mode": deviation_mode,
-                                "n": len(cb_ms[(sel, r)]),
+                                "n": len(cb_ms[(sel, pt)]),
                                 "speedup_vs_recompute": rec_median / cb_agg["ttft_ms_median"],
-                                **cb_agg})
+                                **_budget_fields(budget_mode, pt), **cb_agg})
 
         print(f"  full_recompute median={rec_median:.1f}ms  "
               f"full_reuse median={reuse_agg['ttft_ms_median']:.1f}ms "
               f"({rec_median / reuse_agg['ttft_ms_median']:.2f}x)")
         for sel in selection_modes:
-            for r in ratios:
-                row = next(x for x in results if x["dataset"] == ds_name
-                           and x["strategy"] == "cacheblend" and x["ratio"] == r
-                           and x.get("selection") == sel)
-                print(f"  cacheblend sel={sel} r={r} median={row['ttft_ms_median']:.1f}ms "
-                      f"({row['speedup_vs_recompute']:.2f}x)")
+            for pt in points:
+                cb_agg = _agg(cb_ms[(sel, pt)])
+                spd = rec_median / cb_agg["ttft_ms_median"]
+                print(f"  cacheblend sel={sel} {budget_mode}={pt} "
+                      f"median={cb_agg['ttft_ms_median']:.1f}ms ({spd:.2f}x)")
     return results
 
 
@@ -410,9 +461,13 @@ def _merge(ttft_rows: List[Dict[str, Any]],
     ``speedup_vs_recompute``. Order follows the accuracy rows.
     """
     TTFT_FIELDS = ("ttft_ms_median", "ttft_ms_mean", "ttft_ms_p90", "speedup_vs_recompute")
+    CARRY = ("budget_mode", "threshold", "mean_budget")
 
     def key(r: Dict[str, Any]) -> Tuple[str, str, Optional[float], Optional[str]]:
-        return (r["dataset"], r["strategy"], r.get("ratio"), r.get("selection"))
+        # Budget point is `ratio` (ratio mode) or `threshold` (threshold mode);
+        # keying on it keeps multiple threshold cells per selection distinct.
+        point = r.get("ratio") if r.get("ratio") is not None else r.get("threshold")
+        return (r["dataset"], r["strategy"], point, r.get("selection"))
 
     merged: "Dict[Tuple[str, str, Optional[float], Optional[str]], Dict[str, Any]]" = {}
     order: List[Tuple[str, str, Optional[float], Optional[str]]] = []
@@ -427,6 +482,9 @@ def _merge(ttft_rows: List[Dict[str, Any]],
             order.append(k)
         if "deviation_mode" in r and "deviation_mode" not in merged[k]:
             merged[k]["deviation_mode"] = r["deviation_mode"]
+        for f in CARRY:
+            if f in r and f not in merged[k]:
+                merged[k][f] = r[f]
         return merged[k]
 
     for r in acc_rows:
@@ -516,7 +574,14 @@ def run_combined(config_path: str, repeats: int = 3, warmup: int = 1,
               f"(max|logit diff|={correctness['max_logit_diff']:.4g})")
     for row in results:
         ratio = row.get("ratio")
-        ratio_s = f"r={ratio:.2f}" if isinstance(ratio, (int, float)) else "-"
+        if isinstance(ratio, (int, float)):
+            budget_s = f"r={ratio:.2f}"          # fixed-budget (ratio) cell
+        elif isinstance(row.get("threshold"), (int, float)):
+            mb = row.get("mean_budget")
+            mb_s = f"~{mb:.2f}" if isinstance(mb, (int, float)) else "?"
+            budget_s = f"t={row['threshold']:.2f}({mb_s})"  # threshold cell + realized budget
+        else:
+            budget_s = "-"
         sel_s = row.get("selection") or "-"
         mean = row.get("mean")
         mean_s = f"{mean:.3f}" if isinstance(mean, (int, float)) else "n/a"
@@ -524,7 +589,7 @@ def run_combined(config_path: str, repeats: int = 3, warmup: int = 1,
         ttft_s = f"{ttft:.1f}ms" if isinstance(ttft, (int, float)) else "n/a"
         spd = row.get("speedup_vs_recompute")
         spd_s = f"{spd:.2f}x" if isinstance(spd, (int, float)) else "n/a"
-        print(f"  {row['dataset']:<14} {row['strategy']:<16} {sel_s:<13} {ratio_s:<8} "
+        print(f"  {row['dataset']:<14} {row['strategy']:<16} {sel_s:<13} {budget_s:<14} "
               f"acc={mean_s} ttft={ttft_s} ({spd_s}) n={row.get('n')}")
     return summary
 
@@ -534,9 +599,9 @@ def run_ttft_only(config_path: str, repeats: int = 3, warmup: int = 1) -> dict:
     cfg = yaml.safe_load(open(config_path, "r", encoding="utf-8"))
     seed = cfg.get("seed", 42)
     _set_seed(seed)
+    _bm, _pts, _ = _budget_points(cfg["strategy"])
     print(f"[eval] TTFT-only seed={seed} config={config_path} "
-          f"repeats={repeats} warmup={warmup} "
-          f"ratios={cfg['strategy']['recompute_ratios']}")
+          f"repeats={repeats} warmup={warmup} {_bm}={_pts}")
 
     model, tokenizer, device, dtype = _load_model(cfg)
     results = measure_ttft(model, tokenizer, dtype, cfg, repeats=repeats, warmup=warmup)

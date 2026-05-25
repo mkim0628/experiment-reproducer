@@ -29,6 +29,7 @@ import torch
 DEVIATION_MODES = ("v", "k", "kv")
 SELECTION_MODES = ("raw", "attn_weighted")
 MASS_SOURCES = ("suffix", "all")
+BUDGET_MODES = ("ratio", "threshold")
 
 
 @dataclass
@@ -51,6 +52,15 @@ class BlendConfig:
     # "suffix" (default) = the suffix/query rows whose generation we care about
     # (cheap: R x T scores, R = suffix length); "all" = every query row.
     mass_source: str = "suffix"
+    # Stage-2 adaptive budget. "ratio" = fixed top-(recompute_ratio) tokens (the
+    # released behaviour). "threshold" = recompute every chunk token whose
+    # importance score (under `selection`) is >= `threshold` * per-example max,
+    # so easy examples recompute fewer tokens (lower average TTFT) and hard ones
+    # more, at matched accuracy. `min_frac`/`max_frac` clamp the realized budget.
+    budget_mode: str = "ratio"
+    threshold: float = 0.5
+    min_frac: float = 0.0
+    max_frac: float = 1.0
 
     def __post_init__(self) -> None:
         if self.deviation_mode not in DEVIATION_MODES:
@@ -65,6 +75,17 @@ class BlendConfig:
         if self.mass_source not in MASS_SOURCES:
             raise ValueError(
                 f"mass_source must be one of {MASS_SOURCES}; got {self.mass_source!r}"
+            )
+        if self.budget_mode not in BUDGET_MODES:
+            raise ValueError(
+                f"budget_mode must be one of {BUDGET_MODES}; got {self.budget_mode!r}"
+            )
+        if not 0.0 <= self.threshold <= 1.0:
+            raise ValueError(f"threshold must be in [0, 1]; got {self.threshold}")
+        if not 0.0 <= self.min_frac <= self.max_frac <= 1.0:
+            raise ValueError(
+                f"need 0 <= min_frac <= max_frac <= 1; got "
+                f"min_frac={self.min_frac}, max_frac={self.max_frac}"
             )
 
 
@@ -150,6 +171,49 @@ def select_hkvd_indices(deviation: torch.Tensor, r: float) -> torch.LongTensor:
     top = torch.topk(deviation, k=k).indices
     # Sort ascending so downstream slice writes are deterministic.
     return torch.sort(top).values
+
+
+def select_by_threshold(
+    score: torch.Tensor,
+    tau: float,
+    min_frac: float = 0.0,
+    max_frac: float = 1.0,
+) -> torch.LongTensor:
+    """Adaptive-budget selection: recompute every token with score >= tau*max(score).
+
+    The threshold is *normalized* to the per-example peak, so it is scale-free
+    across examples (absolute deviation magnitudes vary): an easy example whose
+    importance is concentrated in a few tokens selects few; a hard, diffuse one
+    selects many. The realized count is clamped to
+    ``[ceil(min_frac*N), max(1, ceil(max_frac*N))]`` so a degenerate example can
+    neither recompute nothing (which would collapse to pure reuse) nor more than
+    intended. ``tau=0`` selects all (subject to max_frac); larger ``tau`` selects
+    fewer. Returns ascending indices, matching :func:`select_hkvd_indices`.
+
+    Args:
+        score: 1-D non-negative importance per token, length N.
+        tau: normalized threshold in [0, 1].
+        min_frac / max_frac: floor / ceiling on the recomputed fraction.
+    """
+    if score.dim() != 1:
+        raise ValueError(f"score must be 1-D, got shape {tuple(score.shape)}")
+    if not 0.0 <= tau <= 1.0:
+        raise ValueError(f"tau must be in [0, 1]; got {tau}")
+    n = score.shape[0]
+    if n == 0:
+        return torch.empty(0, dtype=torch.long, device=score.device)
+    kmin = min(n, max(1, math.ceil(min_frac * n)))
+    kmax = min(n, max(kmin, math.ceil(max_frac * n)))
+    smax = score.max()
+    if smax <= 0:  # no positive signal -> recompute the floor budget, deterministic
+        sel = torch.topk(score, k=kmin).indices
+        return torch.sort(sel).values
+    k = int((score >= tau * smax).sum().item())
+    k = max(kmin, min(k, kmax))
+    # topk by score == exactly the >= tau*max set when k matches the mask count,
+    # and the natural extension/restriction once clamped.
+    sel = torch.topk(score, k=k).indices
+    return torch.sort(sel).values
 
 
 # ---------------------------------------------------------- in-place merge

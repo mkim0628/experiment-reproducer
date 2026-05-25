@@ -83,12 +83,16 @@ def _deep_merge(base: dict, patch: dict) -> None:
 
 
 def _build_config_text(mode: str, n: int, deviation_mode: str, config: str,
-                       ratios: str = "") -> str:
+                       ratios: str = "", budget_mode: str = "", thresholds: str = "",
+                       min_frac: float = 0.0, max_frac: float = 1.0) -> str:
     """Read configs/default.yaml and apply the smoke/full overrides.
 
     Returns the resolved YAML *text* (mirrors run_eval_modal.main's logic so the
     two backends stay in lock-step). ``ratios`` (comma-separated, e.g.
     "0.1,0.15,0.2") overrides strategy.recompute_ratios for either mode.
+    ``budget_mode="threshold"`` switches the sweep to the Stage-2 adaptive budget:
+    ``thresholds`` (comma-separated tau, e.g. "0.3,0.5,0.7") + ``min_frac``/
+    ``max_frac`` clamps then drive the per-example recompute budget.
     """
     import yaml
 
@@ -120,6 +124,16 @@ def _build_config_text(mode: str, n: int, deviation_mode: str, config: str,
         parsed = [float(x) for x in str(ratios).split(",") if x.strip() != ""]
         if parsed:
             cfg.setdefault("strategy", {})["recompute_ratios"] = parsed
+
+    if budget_mode == "threshold":
+        strat = cfg.setdefault("strategy", {})
+        strat["budget_mode"] = "threshold"
+        taus = [float(x) for x in str(thresholds).split(",") if x.strip() != ""]
+        strat["thresholds"] = taus or [0.5]
+        strat["min_frac"] = float(min_frac)
+        strat["max_frac"] = float(max_frac)
+    elif budget_mode and budget_mode != "ratio":
+        raise ValueError(f"unknown budget_mode {budget_mode!r} (use 'ratio' or 'threshold')")
 
     return yaml.safe_dump(cfg)
 
@@ -166,18 +180,24 @@ def _prepare_container(deviation_mode: str) -> None:
 
 
 def _resolve_config(mode: str, n: int, deviation_mode: str, config: str, tmp_path: str,
-                    ratios: str = "") -> str:
+                    ratios: str = "", budget_mode: str = "", thresholds: str = "",
+                    min_frac: float = 0.0, max_frac: float = 1.0) -> str:
     """Build the smoke/full config and rewrite paths onto the volume.
 
     Writes the resolved YAML to ``tmp_path`` (the path ``eval.run_eval``
     consumes) and returns it. Dataset paths in the YAML are repo-root relative
     ("workspace/code/data/<f>.json"); prefer the copy uploaded to the volume's
     DATA_DIR, falling back to a bundled copy under CODE_DIR if present.
-    ``ratios`` overrides strategy.recompute_ratios (comma-separated).
+    ``ratios`` overrides strategy.recompute_ratios (comma-separated);
+    ``budget_mode``/``thresholds``/``min_frac``/``max_frac`` drive the Stage-2
+    adaptive budget (see ``_build_config_text``).
     """
     import yaml
 
-    cfg = yaml.safe_load(_build_config_text(mode, n, deviation_mode, config, ratios))
+    cfg = yaml.safe_load(_build_config_text(
+        mode, n, deviation_mode, config, ratios,
+        budget_mode=budget_mode, thresholds=thresholds,
+        min_frac=min_frac, max_frac=max_frac))
     cfg.setdefault("output", {})["results_dir"] = RESULTS_DIR
     for ds in cfg.get("datasets", {}).values():
         p = ds.get("path")
@@ -203,6 +223,10 @@ def run_cerebrium(
     check_correctness: bool = False,
     ratios: str = "",
     ttft_only: bool = False,
+    budget_mode: str = "",
+    thresholds: str = "",
+    min_frac: float = 0.0,
+    max_frac: float = 1.0,
 ):
     """Run the CacheBlend eval (accuracy AND TTFT) on a Cerebrium GPU container.
 
@@ -228,13 +252,21 @@ def run_cerebrium(
     * ``ratios``         -- comma-separated recompute ratios to sweep, e.g.
                             "0.1,0.15,0.2,0.4,0.6,0.8" (overrides the YAML grid).
     * ``ttft_only``      -- time TTFT only (skip the accuracy phase).
+    * ``budget_mode``    -- "ratio" (default, fixed top-r%) or "threshold"
+                            (Stage-2 adaptive: recompute tokens with importance
+                            >= tau * per-example max).
+    * ``thresholds``     -- comma-separated tau to sweep when budget_mode=threshold,
+                            e.g. "0.3,0.5,0.7". ``min_frac``/``max_frac`` clamp the
+                            realized per-example recompute fraction.
 
     The returned dict (and the JSON on the volume) includes an ``environment``
     block: GPU, CUDA/cuDNN, torch/transformers versions, model and dtype.
     """
     _prepare_container(deviation_mode)
     tmp_path = _resolve_config(mode, n, deviation_mode, config,
-                               "/tmp/cerebrium_run_config.yaml", ratios=ratios)
+                               "/tmp/cerebrium_run_config.yaml", ratios=ratios,
+                               budget_mode=budget_mode, thresholds=thresholds,
+                               min_frac=min_frac, max_frac=max_frac)
 
     if ttft_only:
         from eval.run_eval import run_ttft_only

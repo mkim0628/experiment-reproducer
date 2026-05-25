@@ -134,15 +134,26 @@ def _selective_prefill(
     hkvd_idx: Optional[torch.Tensor] = None
     blended_cache = DynamicCache() if build_cache else None
 
-    # Stage-1: cfg.selection drives the ranking when no selector is injected.
-    # "raw" keeps the released inline path (byte-identical); "attn_weighted"
-    # builds the attention-weighted selector. An explicit ``selector`` (e.g. the
-    # analysis harness's oracle) always wins over cfg.selection.
-    if selector is None and getattr(cfg, "selection", "raw") == "attn_weighted":
-        from .selection import attention_weighted_selector
+    # cfg drives the ranking + budget when no selector is injected. An explicit
+    # ``selector`` (e.g. the analysis harness's oracle) always wins.
+    #   budget_mode="threshold" -> adaptive budget on the cfg.selection score.
+    #   budget_mode="ratio" + selection="raw" -> released inline path (byte-identical).
+    #   budget_mode="ratio" + selection="attn_weighted" -> Stage-1 top-r% selector.
+    if selector is None:
+        if getattr(cfg, "budget_mode", "ratio") == "threshold":
+            from .selection import threshold_selector
 
-        selector = attention_weighted_selector(
-            mode=cfg.deviation_mode, mass_source=getattr(cfg, "mass_source", "suffix"))
+            selector = threshold_selector(
+                selection=getattr(cfg, "selection", "raw"),
+                mode=cfg.deviation_mode,
+                mass_source=getattr(cfg, "mass_source", "suffix"),
+                tau=cfg.threshold, min_frac=cfg.min_frac, max_frac=cfg.max_frac,
+            )
+        elif getattr(cfg, "selection", "raw") == "attn_weighted":
+            from .selection import attention_weighted_selector
+
+            selector = attention_weighted_selector(
+                mode=cfg.deviation_mode, mass_source=getattr(cfg, "mass_source", "suffix"))
 
     for li in range(L):
         layer = model.model.layers[li]
@@ -291,6 +302,7 @@ def cacheblend_selective_generate(
     max_new_tokens: int = 32,
     prefix: str = "",
     suffix: str = "",
+    stats: Optional[dict] = None,
 ) -> str:
     """Single-pass selective-recompute generation -- the cacheblend strategy.
 
@@ -298,6 +310,11 @@ def cacheblend_selective_generate(
     a shared chunk-KV store, a BlendConfig). Runs ONE forward, so its first-token
     latency is the algorithm's real TTFT and the same call also produces the text
     that run_eval scores for accuracy.
+
+    If ``stats`` is given, the realized recompute budget for this example is
+    written into it: ``n_hkvd`` (selected chunk tokens), ``C`` (total chunk
+    tokens), ``budget_frac`` (n_hkvd / C). This lets the adaptive (threshold)
+    budget be reported as an *actual* average fraction without an extra forward.
     """
     if prefix:
         raise NotImplementedError("cacheblend_selective_generate: prefix unsupported")
@@ -307,10 +324,16 @@ def cacheblend_selective_generate(
         model, tokenizer, chunks, store, suffix=suffix, query=query
     )
 
-    blended_cache, logits_last, _ = _selective_prefill(
+    blended_cache, logits_last, hkvd_idx = _selective_prefill(
         model, fused_cache, full_ids, total_chunk_len, cfg,
         build_cache=(max_new_tokens > 1),
     )
+    if stats is not None:
+        C = int(total_chunk_len)
+        n_hkvd = int(hkvd_idx.numel()) if hkvd_idx is not None else 0
+        stats["n_hkvd"] = n_hkvd
+        stats["C"] = C
+        stats["budget_frac"] = (n_hkvd / C) if C > 0 else 0.0
 
     first_id = int(torch.argmax(logits_last, dim=-1).item())
     generated: List[int] = [first_id]

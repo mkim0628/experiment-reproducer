@@ -47,7 +47,11 @@ from typing import Callable, Dict, Optional
 import torch
 import torch.nn.functional as F
 
-from .selective_recompute import compute_kv_deviation, select_hkvd_indices
+from .selective_recompute import (
+    compute_kv_deviation,
+    select_by_threshold,
+    select_hkvd_indices,
+)
 
 
 def _repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -150,6 +154,31 @@ def chunk_attention_mass(ctx: SelectionContext, mass_source: str = "suffix") -> 
     return mass[: ctx.C]
 
 
+# ------------------------------------------------------- shared importance score
+def importance_score(ctx: SelectionContext, selection: str = "raw", mode: str = "v",
+                     mass_source: str = "suffix", eps: float = 1e-6) -> torch.Tensor:
+    """Per-chunk-token importance under one ranking rule (length C, non-negative).
+
+    The single source of truth for the score that both the fixed-budget (top-r%)
+    and adaptive-budget (threshold) selectors rank/threshold on, so the two budget
+    modes always agree on *what* is important and differ only in *how many* tokens
+    they take.
+
+    * ``selection="raw"`` -- raw K/V/KV squared-L2 deviation (released CacheBlend).
+    * ``selection="attn_weighted"`` -- deviation x (attention mass + eps).
+    """
+    deviation = compute_kv_deviation(
+        ctx.k_fresh_chunk, ctx.k_cached_chunk,
+        ctx.v_fresh_chunk, ctx.v_cached_chunk, mode=mode,
+    ).float()
+    if selection == "raw":
+        return deviation
+    if selection == "attn_weighted":
+        mass = chunk_attention_mass(ctx, mass_source=mass_source).to(deviation.device)
+        return deviation * (mass + eps)
+    raise ValueError(f"selection must be 'raw' or 'attn_weighted'; got {selection!r}")
+
+
 # ------------------------------------------------------------------ selectors
 def raw_deviation_selector(mode: str = "v") -> Selector:
     """Released CacheBlend rule: top-r% by raw K/V/KV squared-L2 deviation.
@@ -159,11 +188,7 @@ def raw_deviation_selector(mode: str = "v") -> Selector:
     """
 
     def _select(ctx: SelectionContext, r: float) -> torch.LongTensor:
-        deviation = compute_kv_deviation(
-            ctx.k_fresh_chunk, ctx.k_cached_chunk,
-            ctx.v_fresh_chunk, ctx.v_cached_chunk, mode=mode,
-        )
-        return select_hkvd_indices(deviation, r)
+        return select_hkvd_indices(importance_score(ctx, "raw", mode), r)
 
     return _select
 
@@ -179,13 +204,27 @@ def attention_weighted_selector(mode: str = "v", mass_source: str = "suffix",
     """
 
     def _select(ctx: SelectionContext, r: float) -> torch.LongTensor:
-        deviation = compute_kv_deviation(
-            ctx.k_fresh_chunk, ctx.k_cached_chunk,
-            ctx.v_fresh_chunk, ctx.v_cached_chunk, mode=mode,
-        ).float()
-        mass = chunk_attention_mass(ctx, mass_source=mass_source).to(deviation.device)
-        importance = deviation * (mass + eps)
-        return select_hkvd_indices(importance, r)
+        return select_hkvd_indices(
+            importance_score(ctx, "attn_weighted", mode, mass_source, eps), r)
+
+    return _select
+
+
+def threshold_selector(selection: str = "raw", mode: str = "v",
+                       mass_source: str = "suffix", tau: float = 0.5,
+                       min_frac: float = 0.0, max_frac: float = 1.0,
+                       eps: float = 1e-6) -> Selector:
+    """Stage-2 adaptive-budget rule: recompute tokens with score >= tau*max(score).
+
+    Ranks on the SAME ``importance_score`` as the fixed-budget selectors (so it
+    composes with both ``selection="raw"`` and ``"attn_weighted"``), then takes a
+    per-example threshold instead of a fixed top-r%. The ``r`` passed by the
+    forward is ignored -- the budget is set by ``tau`` (+ min/max_frac clamps).
+    """
+
+    def _select(ctx: SelectionContext, r: float) -> torch.LongTensor:
+        score = importance_score(ctx, selection, mode, mass_source, eps)
+        return select_by_threshold(score, tau, min_frac=min_frac, max_frac=max_frac)
 
     return _select
 
@@ -230,6 +269,7 @@ def random_selector(seed: int = 0) -> Selector:
 SELECTOR_FACTORIES: Dict[str, Callable[..., Selector]] = {
     "raw": raw_deviation_selector,
     "attn_weighted": attention_weighted_selector,
+    "threshold": threshold_selector,
     "oracle": precomputed_score_selector,
     "random": random_selector,
 }
