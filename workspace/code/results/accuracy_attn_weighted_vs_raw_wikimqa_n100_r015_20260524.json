@@ -1,0 +1,114 @@
+{
+  "config": {
+    "datasets": {
+      "wikimqa": {
+        "metric": "f1",
+        "n": 100,
+        "path": "/persistent-storage/cacheblend-data/wikimqa_s.json"
+      }
+    },
+    "generation": {
+      "do_sample": false,
+      "max_new_tokens": 32,
+      "temperature": 0.0
+    },
+    "model": {
+      "device": "cuda",
+      "dtype": "float16",
+      "name": "mistralai/Mistral-7B-Instruct-v0.2"
+    },
+    "output": {
+      "results_dir": "/persistent-storage/cacheblend-results"
+    },
+    "seed": 42,
+    "strategy": {
+      "check_layer": 1,
+      "deviation_mode": "v",
+      "mass_source": "suffix",
+      "num_chunks": null,
+      "recompute_ratios": [
+        0.15
+      ],
+      "selection_modes": [
+        "raw",
+        "attn_weighted"
+      ]
+    }
+  },
+  "environment": {
+    "timestamp_utc": "2026-05-24T18:04:47Z",
+    "python": "3.11.0",
+    "platform": "Linux-6.17.0-1013-aws-x86_64-with-glibc2.36",
+    "torch": "2.7.1+cu126",
+    "transformers": "5.8.1",
+    "cuda": "12.6",
+    "cudnn": 90501,
+    "gpu": "NVIDIA L4",
+    "gpu_count": 1,
+    "gpu_memory_total_gb": 23.66,
+    "model": "mistralai/Mistral-7B-Instruct-v0.2",
+    "dtype": "float16"
+  },
+  "ttft": {
+    "repeats": 1,
+    "warmup": 1,
+    "max_new_tokens": 1,
+    "note": "cacheblend is the single-pass selective recompute; the same implementation is timed (TTFT) and scored (accuracy), so each row's acc/ttft come from one inference path"
+  },
+  "phase_order": [
+    "ttft",
+    "accuracy"
+  ],
+  "isolation": "TTFT measured first on a clean device; CUDA cache emptied and RNG re-seeded before the accuracy phase; accuracy does full-length generation but is never inside a timed region, so it cannot affect the TTFT numbers.",
+  "correctness": null,
+  "results": [
+    {
+      "dataset": "wikimqa",
+      "strategy": "full_recompute",
+      "ratio": null,
+      "n": 100,
+      "mean": 0.2709475244823376,
+      "ttft_ms_median": 2442.771301499988,
+      "ttft_ms_mean": 2455.0295549099988,
+      "ttft_ms_p90": 2579.2906408000704,
+      "speedup_vs_recompute": 1.0
+    },
+    {
+      "dataset": "wikimqa",
+      "strategy": "full_reuse",
+      "ratio": null,
+      "n": 100,
+      "mean": 0.21191097638758405,
+      "ttft_ms_median": 293.66156800000454,
+      "ttft_ms_mean": 295.79471129999916,
+      "ttft_ms_p90": 309.84037999999146,
+      "speedup_vs_recompute": 8.318321386542316
+    },
+    {
+      "dataset": "wikimqa",
+      "strategy": "cacheblend",
+      "ratio": 0.15,
+      "n": 100,
+      "selection": "raw",
+      "deviation_mode": "v",
+      "mean": 0.23655523283470042,
+      "ttft_ms_median": 938.6141619999933,
+      "ttft_ms_mean": 927.8812879499953,
+      "ttft_ms_p90": 963.8459137998894,
+      "speedup_vs_recompute": 2.6025297725051857
+    },
+    {
+      "dataset": "wikimqa",
+      "strategy": "cacheblend",
+      "ratio": 0.15,
+      "n": 100,
+      "selection": "attn_weighted",
+      "deviation_mode": "v",
+      "mean": 0.24449898902702688,
+      "ttft_ms_median": 939.1956755000024,
+      "ttft_ms_mean": 930.4122139699933,
+      "ttft_ms_p90": 967.3106533000691,
+      "speedup_vs_recompute": 2.600918387107695
+    }
+  ]
+}
