@@ -50,7 +50,13 @@ shell_commands = []
 
 [cerebrium.hardware]
 cpu = 4
-memory = 16.0
+# 32 GB host RAM. 16 GB OOM-killed (exit 137) the long sweeps: Mistral-7B's CPU
+# load footprint (~14 GB) plus the per-example CPU-side ChunkKVStore for long
+# wikimqa contexts (a single ~8k-token context's KV is ~1 GB on CPU) exceeded
+# 16 GB on later, longer examples -> kill + retry -> crash-loop. Short smokes fit
+# (early examples are short), so this only bit the n>=50 runs. This is HOST RAM,
+# not the L4's 24 GB VRAM, so it does not change the GPU tier / GPU cost.
+memory = 32.0
 # ADA_L4 = NVIDIA L4, 24 GB (Hobby+ plan). Cheapest GPU that fits Mistral-7B
 # fp16 with KV-cache headroom. See CLAUDE.md before changing.
 compute = "ADA_L4"

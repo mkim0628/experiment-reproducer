@@ -156,6 +156,16 @@ def _prepare_container(deviation_mode: str) -> None:
     if deviation_mode and deviation_mode not in ("v", "k", "kv"):
         raise ValueError(f"unknown deviation_mode {deviation_mode!r} (use 'v', 'k' or 'kv')")
 
+    # Flush prints per line so the eval's progress markers ("phase 1/2", "10/50",
+    # ...) appear in `cerebrium logs` LIVE. Cerebrium pipes stdout, so Python
+    # block-buffers it by default and a long run looks silent (no output until it
+    # exits) -- which makes a slow run indistinguishable from a hang.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception:  # noqa: BLE001 -- best-effort; older/odd stream types
+        pass
+
     # Reduce CUDA caching-allocator fragmentation. The single-pass validation
     # cycles through several full-prompt KV caches per example; without this the
     # allocator can hold ~enough freed-but-non-contiguous blocks to fail a small
