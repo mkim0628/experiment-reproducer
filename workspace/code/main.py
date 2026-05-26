@@ -84,7 +84,8 @@ def _deep_merge(base: dict, patch: dict) -> None:
 
 def _build_config_text(mode: str, n: int, deviation_mode: str, config: str,
                        ratios: str = "", budget_mode: str = "", thresholds: str = "",
-                       min_frac: float = 0.0, max_frac: float = 1.0) -> str:
+                       min_frac: float = 0.0, max_frac: float = 1.0,
+                       selection: str = "") -> str:
     """Read configs/default.yaml and apply the smoke/full overrides.
 
     Returns the resolved YAML *text* (mirrors run_eval_modal.main's logic so the
@@ -93,6 +94,8 @@ def _build_config_text(mode: str, n: int, deviation_mode: str, config: str,
     ``budget_mode="threshold"`` switches the sweep to the Stage-2 adaptive budget:
     ``thresholds`` (comma-separated tau, e.g. "0.3,0.5,0.7") + ``min_frac``/
     ``max_frac`` clamps then drive the per-example recompute budget.
+    ``selection`` (e.g. "attn_weighted") overrides strategy.selection_modes to a
+    single mode, so the two budget modes can each sweep a mode-specific tau grid.
     """
     import yaml
 
@@ -134,6 +137,11 @@ def _build_config_text(mode: str, n: int, deviation_mode: str, config: str,
         strat["max_frac"] = float(max_frac)
     elif budget_mode and budget_mode != "ratio":
         raise ValueError(f"unknown budget_mode {budget_mode!r} (use 'ratio' or 'threshold')")
+
+    if selection:
+        if selection not in ("raw", "attn_weighted"):
+            raise ValueError(f"unknown selection {selection!r} (use 'raw' or 'attn_weighted')")
+        cfg.setdefault("strategy", {})["selection_modes"] = [selection]
 
     return yaml.safe_dump(cfg)
 
@@ -181,7 +189,8 @@ def _prepare_container(deviation_mode: str) -> None:
 
 def _resolve_config(mode: str, n: int, deviation_mode: str, config: str, tmp_path: str,
                     ratios: str = "", budget_mode: str = "", thresholds: str = "",
-                    min_frac: float = 0.0, max_frac: float = 1.0) -> str:
+                    min_frac: float = 0.0, max_frac: float = 1.0,
+                    selection: str = "") -> str:
     """Build the smoke/full config and rewrite paths onto the volume.
 
     Writes the resolved YAML to ``tmp_path`` (the path ``eval.run_eval``
@@ -197,7 +206,7 @@ def _resolve_config(mode: str, n: int, deviation_mode: str, config: str, tmp_pat
     cfg = yaml.safe_load(_build_config_text(
         mode, n, deviation_mode, config, ratios,
         budget_mode=budget_mode, thresholds=thresholds,
-        min_frac=min_frac, max_frac=max_frac))
+        min_frac=min_frac, max_frac=max_frac, selection=selection))
     cfg.setdefault("output", {})["results_dir"] = RESULTS_DIR
     for ds in cfg.get("datasets", {}).values():
         p = ds.get("path")
@@ -227,6 +236,7 @@ def run_cerebrium(
     thresholds: str = "",
     min_frac: float = 0.0,
     max_frac: float = 1.0,
+    selection: str = "",
 ):
     """Run the CacheBlend eval (accuracy AND TTFT) on a Cerebrium GPU container.
 
@@ -258,6 +268,9 @@ def run_cerebrium(
     * ``thresholds``     -- comma-separated tau to sweep when budget_mode=threshold,
                             e.g. "0.3,0.5,0.7". ``min_frac``/``max_frac`` clamp the
                             realized per-example recompute fraction.
+    * ``selection``      -- restrict to one ranking signal ("raw" or
+                            "attn_weighted") instead of the YAML's selection_modes,
+                            so each budget mode can sweep a mode-specific tau grid.
 
     The returned dict (and the JSON on the volume) includes an ``environment``
     block: GPU, CUDA/cuDNN, torch/transformers versions, model and dtype.
@@ -266,7 +279,7 @@ def run_cerebrium(
     tmp_path = _resolve_config(mode, n, deviation_mode, config,
                                "/tmp/cerebrium_run_config.yaml", ratios=ratios,
                                budget_mode=budget_mode, thresholds=thresholds,
-                               min_frac=min_frac, max_frac=max_frac)
+                               min_frac=min_frac, max_frac=max_frac, selection=selection)
 
     if ttft_only:
         from eval.run_eval import run_ttft_only

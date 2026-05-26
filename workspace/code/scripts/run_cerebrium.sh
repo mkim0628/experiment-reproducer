@@ -49,6 +49,7 @@ BUDGET_MODE=""
 THRESHOLDS=""
 MIN_FRAC=""
 MAX_FRAC=""
+SELECTION=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode)              MODE="$2";    shift 2;;
@@ -64,6 +65,7 @@ while [[ $# -gt 0 ]]; do
     --thresholds)        THRESHOLDS="$2";  shift 2;;
     --min-frac)          MIN_FRAC="$2";    shift 2;;
     --max-frac)          MAX_FRAC="$2";    shift 2;;
+    --selection)         SELECTION="$2";   shift 2;;
     -h|--help)           sed -n '2,40p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -89,6 +91,7 @@ body="{\"mode\":\"${MODE}\""
 [[ -n "$THRESHOLDS" ]]  && body="${body},\"thresholds\":\"${THRESHOLDS}\""
 [[ -n "$MIN_FRAC" ]]    && body="${body},\"min_frac\":${MIN_FRAC}"
 [[ -n "$MAX_FRAC" ]]    && body="${body},\"max_frac\":${MAX_FRAC}"
+[[ -n "$SELECTION" ]]  && body="${body},\"selection\":\"${SELECTION}\""
 body="${body}}"
 
 base="https://api.${REGION}.cerebrium.ai/v4/${CEREBRIUM_PROJECT_ID}/${APP}/${FUNC}"
